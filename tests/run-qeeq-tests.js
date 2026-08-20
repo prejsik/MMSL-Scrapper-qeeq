@@ -1637,3 +1637,116 @@ test('expected-keys containment uses root-safe relative paths and permits prefix
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('HTML ranks only finite verified public totals and separates conditional prices', () => {
+  const { buildHtmlReport } = require('../src/qeeq/reportHtml');
+  const html = buildHtmlReport({
+    run_status: 'success', quality_status: 'pass', expected_checks: 1, completed_checks: 1, failed_checks: 0,
+    scenarios: [{ key: 'ktw', status: 'success', iata: 'KTW', pickup_at: '2026-09-19T10:00:00', rental_days: 2, offers: [
+      { provider_name: 'TIE FIRST', vehicle_name: 'A', total_price: 119, daily_price: 59.5, currency: 'PLN', price_tier: 'public', price_verified: true, source_search_url: 'https://www.qeeq.pl/car/search' },
+      { provider_name: 'TIE SECOND', vehicle_name: 'B', total_price: 119, currency: 'PLN', price_tier: 'public', price_verified: true, source_search_url: 'https://www.qeeq.pl/car/search' },
+      { provider_name: 'CHEAPEST', vehicle_name: 'C', total_price: 100, currency: 'PLN', price_tier: 'public', price_verified: true },
+      { provider_name: 'FOURTH', vehicle_name: 'D', total_price: 120, currency: 'PLN', price_tier: 'public', price_verified: true },
+      { provider_name: 'CARWIZ', vehicle_name: 'Skoda Fabia', total_price: null, conditional_offer_total: 106, conditional_offer_type: 'newcomer_coupon', conditional_member_total: 98, currency: 'PLN', price_tier: 'conditional', price_verified: false, conditional_price_verified: true, source_search_url: 'https://www.qeeq.pl/car/search' },
+      { provider_name: 'MEMBER', vehicle_name: 'Test', total_price: 90, currency: 'PLN', price_tier: 'diamond', price_verified: true },
+      { provider_name: 'INFINITE', vehicle_name: 'Bad', total_price: Infinity, currency: 'PLN', price_tier: 'public', price_verified: true },
+      { provider_name: 'NULL TIER', vehicle_name: 'Unknown', total_price: 80, currency: 'PLN', price_tier: null, price_verified: true }
+    ] }]
+  });
+  assert.match(html, /Top 3 zweryfikowanych cen publicznych/);
+  assert.match(html, /CARWIZ/);
+  assert.match(html, /newcomer_coupon[\s\S]*106/);
+  assert.match(html, /Cena Diamentowa[\s\S]*98/);
+  const top3 = html.match(/<section id="top3">([\s\S]*?)<\/section>/)[1];
+  assert.match(top3, /CHEAPEST[\s\S]*100[\s\S]*TIE FIRST[\s\S]*119[\s\S]*TIE SECOND[\s\S]*119/);
+  assert.doesNotMatch(top3, /FOURTH|CARWIZ|MEMBER|INFINITE|NULL TIER/);
+});
+
+test('HTML is self-contained, filterable, and shows warning counts before Top 3', () => {
+  const { buildHtmlReport } = require('../src/qeeq/reportHtml');
+  const html = buildHtmlReport({
+    run_status: 'partial', quality_status: 'warning', expected_checks: 9, completed_checks: 7, failed_checks: 2,
+    quality: { quality_errors: ['price_unverified'] },
+    scenarios: [{ key: 'ktw', status: 'failure', iata: 'KTW', pickup_at: '2026-09-19T10:00:00', rental_days: 2, offers: [{ provider_name: 'PUBLIC', transmission: 'Automatic', total_price: 119, currency: 'PLN', price_tier: 'public', price_verified: true }] }]
+  });
+  const warningIndex = html.indexOf('id="status-banner"');
+  const top3Index = html.indexOf('id="top3"');
+  assert.ok(warningIndex >= 0 && warningIndex < top3Index);
+  assert.match(html, /Oczekiwane[\s\S]*9[\s\S]*Ukończone[\s\S]*7[\s\S]*Nieudane[\s\S]*2/);
+  for (const filter of ['airport', 'pickup-date', 'duration', 'transmission', 'provider', 'status']) assert.match(html, new RegExp(`id="filter-${filter}"`));
+  assert.match(html, /price_unverified/);
+  assert.match(html, /Content-Security-Policy/);
+  assert.doesNotMatch(html, /<link\b|<img\b[^>]*https?:|<form\b|fetch\s*\(|XMLHttpRequest|https?:\/\/(?!www\.qeeq\.pl\/car\/search)/);
+});
+
+test('HTML escapes every dynamic context and never embeds data in executable script', () => {
+  const { buildHtmlReport, escapeHtml } = require('../src/qeeq/reportHtml');
+  const attack = '</script><img src=x onerror="alert(1)">' + '\u2028' + '\u2029' + "' & < > \"";
+  const html = buildHtmlReport({
+    run_status: attack, quality_status: 'warning', expected_checks: attack,
+    quality: { quality_errors: [attack] }, errors: [{ code: attack }],
+    scenarios: [{ key: attack, status: attack, iata: attack, requested_city: attack, pickup_at: attack, rental_days: attack, quality_errors: [attack], offers: [{
+      provider_name: attack, vehicle_name: attack, transmission: attack, conditional_offer_type: attack,
+      total_price: 10, currency: attack, price_tier: 'public', price_verified: true,
+      source_search_url: 'javascript:alert(1)" onmouseover="alert(2)', clid: 'FORBIDDEN-CLID-VALUE', raw_html: 'FORBIDDEN-RAW-HTML'
+    }] }]
+  });
+  assert.equal(escapeHtml(null), '');
+  assert.equal(escapeHtml(`&<>"'\u2028\u2029`), '&amp;&lt;&gt;&quot;&#39;&#8232;&#8233;');
+  assert.doesNotMatch(html, /<img\b|onerror\s*=|onmouseover\s*=|javascript:|<\/script><img|\u2028|\u2029/);
+  assert.doesNotMatch(html.match(/<script[^>]*>([\s\S]*?)<\/script>/)[1], /alert\(1\)|price_unverified|PUBLIC/);
+  assert.match(html, /&lt;\/script&gt;&lt;img/);
+  assert.doesNotMatch(html, /href="(?!https:\/\/www\.qeeq\.pl\/car\/search")/);
+  assert.doesNotMatch(html, /FORBIDDEN-CLID-VALUE|FORBIDDEN-RAW-HTML/);
+});
+
+test('HTML handles empty and malformed collections deterministically', () => {
+  const { buildHtmlReport } = require('../src/qeeq/reportHtml');
+  const malformed = { run_status: 'failure', quality_status: 'fail', scenarios: { no: 'array' }, quality: { quality_errors: 'bad' }, errors: null };
+  assert.equal(buildHtmlReport(malformed), buildHtmlReport(malformed));
+  assert.match(buildHtmlReport(malformed), /Brak scenariuszy/);
+  assert.doesNotThrow(() => buildHtmlReport({ scenarios: [{ offers: null, quality_errors: {} }] }));
+});
+
+test('HTML module exposes exact interfaces and CLI writes atomically without input collision', () => {
+  const { spawnSync } = require('node:child_process');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const modulePath = path.resolve(__dirname, '../src/qeeq/reportHtml.js');
+  const report = require('../src/qeeq/reportHtml');
+  assert.deepEqual(Object.keys(report).sort(), ['buildHtmlReport', 'escapeHtml', 'generateReportFromFile', 'writeHtmlReport']);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-html-'));
+  const input = path.join(directory, 'input.json');
+  const output = path.join(directory, 'nested', 'report.html');
+  try {
+    fs.writeFileSync(input, JSON.stringify({ run_status: 'success', quality_status: 'pass', scenarios: [] }));
+    const help = spawnSync(process.execPath, [modulePath, '--help'], { cwd: directory, encoding: 'utf8' });
+    assert.equal(help.status, 0);
+    assert.match(help.stdout, /Usage:/);
+    assert.deepEqual(fs.readdirSync(directory), ['input.json']);
+
+    const made = spawnSync(process.execPath, [modulePath, input, output], { encoding: 'utf8' });
+    assert.equal(made.status, 0);
+    assert.match(fs.readFileSync(output, 'utf8'), /<!doctype html>/i);
+    assert.deepEqual(fs.readdirSync(path.dirname(output)), ['report.html']);
+
+    fs.writeFileSync(output, 'OLD HTML');
+    const hook = path.join(path.dirname(output), 'rename-hook.cjs');
+    fs.writeFileSync(hook, `const fs=require('node:fs');fs.renameSync=()=>{throw new Error('injected rename failure')};`);
+    const failedWrite = spawnSync(process.execPath, ['-r', hook, modulePath, input, output], { encoding: 'utf8' });
+    assert.equal(failedWrite.status, 1);
+    assert.equal(fs.readFileSync(output, 'utf8'), 'OLD HTML');
+    assert.deepEqual(fs.readdirSync(path.dirname(output)).filter(name => name.endsWith('.tmp')), []);
+    fs.unlinkSync(hook);
+
+    const before = fs.readFileSync(input, 'utf8');
+    const collision = spawnSync(process.execPath, [modulePath, input, input], { encoding: 'utf8' });
+    assert.equal(collision.status, 1);
+    assert.equal(fs.readFileSync(input, 'utf8'), before);
+    assert.deepEqual(fs.readdirSync(directory).sort(), ['input.json', 'nested']);
+    assert.equal(spawnSync(process.execPath, [modulePath, input], { encoding: 'utf8' }).status, 1);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
