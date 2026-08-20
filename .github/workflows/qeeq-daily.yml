@@ -59,6 +59,10 @@ jobs:
       plan_only: ${{ steps.plan.outputs.plan_only }}
       scenario_count: ${{ steps.plan.outputs.scenario_count }}
       budget_ok: ${{ steps.plan.outputs.budget_ok }}
+      average_offers_per_scenario: ${{ steps.plan.outputs.average_offers_per_scenario }}
+      average_artifact_bytes_per_scenario: ${{ steps.plan.outputs.average_artifact_bytes_per_scenario }}
+      estimated_offer_volume: ${{ steps.plan.outputs.estimated_offer_volume }}
+      estimated_artifact_bytes: ${{ steps.plan.outputs.estimated_artifact_bytes }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -81,6 +85,8 @@ jobs:
           QEEQ_BENCHMARK_STAGE: ${{ vars.QEEQ_BENCHMARK_STAGE }}
           QEEQ_P50_SCENARIO_SECONDS: ${{ vars.QEEQ_P50_SCENARIO_SECONDS }}
           QEEQ_P95_SCENARIO_SECONDS: ${{ vars.QEEQ_P95_SCENARIO_SECONDS }}
+          QEEQ_AVERAGE_OFFERS_PER_SCENARIO: ${{ vars.QEEQ_AVERAGE_OFFERS_PER_SCENARIO }}
+          QEEQ_AVERAGE_ARTIFACT_BYTES_PER_SCENARIO: ${{ vars.QEEQ_AVERAGE_ARTIFACT_BYTES_PER_SCENARIO }}
           QEEQ_MAX_PARALLEL: ${{ vars.QEEQ_MAX_PARALLEL }}
           QEEQ_TARGET_CHUNK_MINUTES: ${{ vars.QEEQ_TARGET_CHUNK_MINUTES }}
           QEEQ_MAX_BROWSER_MINUTES: ${{ vars.QEEQ_MAX_BROWSER_MINUTES }}
@@ -112,6 +118,8 @@ jobs:
             --benchmark-stage="${QEEQ_BENCHMARK_STAGE:-}" \
             --p50-scenario-seconds="${QEEQ_P50_SCENARIO_SECONDS:-}" \
             --p95-scenario-seconds="${QEEQ_P95_SCENARIO_SECONDS:-}" \
+            --average-offers-per-scenario="${QEEQ_AVERAGE_OFFERS_PER_SCENARIO:-}" \
+            --average-artifact-bytes-per-scenario="${QEEQ_AVERAGE_ARTIFACT_BYTES_PER_SCENARIO:-}" \
             --max-parallel="${QEEQ_MAX_PARALLEL:-}" \
             --target-chunk-minutes="${QEEQ_TARGET_CHUNK_MINUTES:-}" \
             --max-browser-minutes="${QEEQ_MAX_BROWSER_MINUTES:-}" \

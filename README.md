@@ -176,14 +176,16 @@ Repository variables used by `.github/workflows/qeeq-daily.yml`:
 | `QEEQ_BENCHMARK_STAGE` | Reviewed evidence stage. Scheduled and actual full execution require `4`; full plan-only accepts `3` or `4`. |
 | `QEEQ_P50_SCENARIO_SECONDS` | Positive finite measured median scenario time. |
 | `QEEQ_P95_SCENARIO_SECONDS` | Positive finite measured p95 time, at least p50; drives conservative estimates and chunking. |
+| `QEEQ_AVERAGE_OFFERS_PER_SCENARIO` | Positive finite measured average count of canonical offers emitted per scenario. |
+| `QEEQ_AVERAGE_ARTIFACT_BYTES_PER_SCENARIO` | Positive finite measured average uploaded artifact bytes per scenario, including canonical output and diagnostics from the bounded evidence run. |
 | `QEEQ_MAX_PARALLEL` | Positive measured expanded-run concurrency, at most 256. |
 | `QEEQ_TARGET_CHUNK_MINUTES` | Positive target browser work per date chunk. |
 | `QEEQ_MAX_BROWSER_MINUTES` | Positive total browser-minute budget; execution is refused when the p95 estimate exceeds it. |
 | `QEEQ_PAGES_ENABLED` | Exact `true` allows Pages only after merge produced every required report; otherwise artifacts remain the fallback. |
 
-The planner estimates browser use as `scenario_count × QEEQ_P95_SCENARIO_SECONDS / 60`, limits the matrix to 256 chunks, and rejects a derived GitHub job timeout above 360 minutes. Measurement variables must come from bounded stages, not guesses.
+The planner calculates three deterministic estimates: browser use is `scenario_count × QEEQ_P95_SCENARIO_SECONDS / 60`, `estimated_offer_volume` is `scenario_count × QEEQ_AVERAGE_OFFERS_PER_SCENARIO`, and `estimated_artifact_bytes` is `scenario_count × QEEQ_AVERAGE_ARTIFACT_BYTES_PER_SCENARIO`. It emits the measured averages and both volume estimates in the plan JSON, console JSON, and GitHub outputs. It limits the matrix to 256 chunks and rejects a derived GitHub job timeout above 360 minutes. Every required measurement must be positive and finite and must come from bounded stages, not guesses or clamped defaults.
 
-Manual `workflow_dispatch` defaults remain one KTW/two-day scenario with parallelism 1. A request above nine scenarios additionally requires `acknowledge_expanded_run=true` and valid measured repository variables. `plan_only=true` is the safe way to inspect a larger plan without running scrape jobs. The separate `qeeq-smoke.yml` never deploys Pages or sends Telegram.
+Manual `workflow_dispatch` defaults remain one KTW/two-day scenario with parallelism 1 and does not require capacity measurements. A request above nine scenarios additionally requires `acknowledge_expanded_run=true` and all valid measured repository variables. `plan_only=true` is the safe way to inspect a larger plan without running scrape jobs. The separate `qeeq-smoke.yml` never deploys Pages or sends Telegram; it succeeds only when canonical smoke JSON reports `run_status: success`, `quality_status: pass`, and contains at least one resolved, verified public finite PLN total. Diagnostics are uploaded with `if: always()` before that acceptance result can fail the job.
 
 ## Artifacts, Pages, and Telegram
 

@@ -121,6 +121,8 @@ function validateMeasurements(input) {
   return {
     p50,
     p95,
+    averageOffersPerScenario: positiveFinite(input.averageOffersPerScenario, 'averageOffersPerScenario'),
+    averageArtifactBytesPerScenario: positiveFinite(input.averageArtifactBytesPerScenario, 'averageArtifactBytesPerScenario'),
     maxParallel,
     targetChunkMinutes: positiveFinite(input.targetChunkMinutes, 'targetChunkMinutes'),
     maxBrowserMinutes: positiveFinite(input.maxBrowserMinutes, 'maxBrowserMinutes')
@@ -158,6 +160,10 @@ function buildWorkflowPlan(rawInput = {}) {
       dates_per_chunk: 0,
       p50_scenario_seconds: null,
       p95_scenario_seconds: null,
+      average_offers_per_scenario: null,
+      average_artifact_bytes_per_scenario: null,
+      estimated_offer_volume: null,
+      estimated_artifact_bytes: null,
       estimated_browser_minutes: null,
       budget_ok: null,
       expected_scenario_keys: expectedScenarioKeys
@@ -166,6 +172,8 @@ function buildWorkflowPlan(rawInput = {}) {
 
   const measurements = gates.requiresMeasurements ? validateMeasurements(input) : null;
   const estimatedBrowserMinutes = measurements ? scenarioCount * measurements.p95 / 60 : null;
+  const estimatedOfferVolume = measurements ? scenarioCount * measurements.averageOffersPerScenario : null;
+  const estimatedArtifactBytes = measurements ? scenarioCount * measurements.averageArtifactBytesPerScenario : null;
   const budgetOk = measurements ? estimatedBrowserMinutes <= measurements.maxBrowserMinutes : true;
   if (!gates.planOnly && !budgetOk) throw new Error('Estimated run exceeds the configured browser-minute budget');
 
@@ -207,6 +215,10 @@ function buildWorkflowPlan(rawInput = {}) {
     dates_per_chunk: datesPerChunk,
     p50_scenario_seconds: measurements?.p50 ?? null,
     p95_scenario_seconds: measurements?.p95 ?? null,
+    average_offers_per_scenario: measurements?.averageOffersPerScenario ?? null,
+    average_artifact_bytes_per_scenario: measurements?.averageArtifactBytesPerScenario ?? null,
+    estimated_offer_volume: estimatedOfferVolume,
+    estimated_artifact_bytes: estimatedArtifactBytes,
     estimated_browser_minutes: estimatedBrowserMinutes,
     budget_ok: budgetOk,
     expected_scenario_keys: expectedScenarioKeys
@@ -230,6 +242,7 @@ function parseArgs(argv) {
   const allowed = new Set([
     'event-name', 'time-zone', 'locations', 'rolling-days', 'durations-days', 'full-enabled',
     'benchmark-stage', 'p50-scenario-seconds', 'p95-scenario-seconds', 'max-parallel',
+    'average-offers-per-scenario', 'average-artifact-bytes-per-scenario',
     'manual-max-parallel', 'target-chunk-minutes', 'max-browser-minutes',
     'acknowledge-expanded-run', 'plan-only', 'output', 'expected-keys-output', 'github-output'
   ]);
@@ -257,6 +270,8 @@ function parseArgs(argv) {
       benchmarkStage: number('benchmark-stage'),
       p50ScenarioSeconds: number('p50-scenario-seconds'),
       p95ScenarioSeconds: number('p95-scenario-seconds'),
+      averageOffersPerScenario: number('average-offers-per-scenario'),
+      averageArtifactBytesPerScenario: number('average-artifact-bytes-per-scenario'),
       maxParallel: number('max-parallel'),
       manualMaxParallel: number('manual-max-parallel') ?? 1,
       targetChunkMinutes: number('target-chunk-minutes'),
@@ -292,14 +307,18 @@ function writeGithubOutputs(filePath, plan) {
     plan_only: String(plan.plan_only),
     scenario_count: String(plan.scenario_count),
     budget_ok: JSON.stringify(plan.budget_ok),
-    estimated_browser_minutes: JSON.stringify(plan.estimated_browser_minutes)
+    estimated_browser_minutes: JSON.stringify(plan.estimated_browser_minutes),
+    average_offers_per_scenario: JSON.stringify(plan.average_offers_per_scenario),
+    average_artifact_bytes_per_scenario: JSON.stringify(plan.average_artifact_bytes_per_scenario),
+    estimated_offer_volume: JSON.stringify(plan.estimated_offer_volume),
+    estimated_artifact_bytes: JSON.stringify(plan.estimated_artifact_bytes)
   };
   if (Object.values(values).some(value => /[\r\n]/.test(value))) throw new Error('Unsafe GitHub output value');
   fs.appendFileSync(path.resolve(filePath), `${Object.entries(values).map(([key, value]) => `${key}=${value}`).join('\n')}\n`, 'utf8');
 }
 
 function printHelp() {
-  console.log('Usage: node src/qeeq/workflowPlan.js --event-name=<schedule|workflow_dispatch> --locations=Katowice --rolling-days=1 --durations-days=2 [--output=plan.json] [--expected-keys-output=expected.json] [--github-output=<path>]');
+  console.log('Usage: node src/qeeq/workflowPlan.js --event-name=<schedule|workflow_dispatch> --locations=Katowice --rolling-days=1 --durations-days=2 [--average-offers-per-scenario=<positive>] [--average-artifact-bytes-per-scenario=<positive>] [--output=plan.json] [--expected-keys-output=expected.json] [--github-output=<path>]');
 }
 
 function main(argv = process.argv.slice(2)) {
@@ -320,6 +339,10 @@ function main(argv = process.argv.slice(2)) {
     matrix_entries: plan.matrix.include.length,
     p50_scenario_seconds: plan.p50_scenario_seconds,
     p95_scenario_seconds: plan.p95_scenario_seconds,
+    average_offers_per_scenario: plan.average_offers_per_scenario,
+    average_artifact_bytes_per_scenario: plan.average_artifact_bytes_per_scenario,
+    estimated_offer_volume: plan.estimated_offer_volume,
+    estimated_artifact_bytes: plan.estimated_artifact_bytes,
     estimated_browser_minutes: plan.estimated_browser_minutes,
     max_parallel: plan.max_parallel,
     chunk_timeout_minutes: plan.chunk_timeout_minutes,

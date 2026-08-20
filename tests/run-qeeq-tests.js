@@ -2287,7 +2287,8 @@ test('workflow planner partitions every full-run date into at most 256 consecuti
   const plan = buildWorkflowPlan({
     eventName: 'schedule', timeZone: 'Europe/Warsaw', locations: defaultLocationCities(), rollingDays: 60,
     durationsDays: [2,3,4,5,6,7,8,9,10,11,12,13,14], fullEnabled: true, benchmarkStage: 4,
-    p50ScenarioSeconds: 15, p95ScenarioSeconds: 25, maxParallel: 3, targetChunkMinutes: 60,
+    p50ScenarioSeconds: 15, p95ScenarioSeconds: 25, averageOffersPerScenario: 49,
+    averageArtifactBytesPerScenario: 70359, maxParallel: 3, targetChunkMinutes: 60,
     maxBrowserMinutes: 3000, now: new Date('2026-08-20T10:00:00+02:00')
   });
   assert.equal(plan.scenario_count, 7020);
@@ -2310,7 +2311,8 @@ test('stage three can produce a full plan-only estimate without enabling product
     eventName: 'workflow_dispatch', planOnly: true, acknowledgeExpandedRun: true,
     timeZone: 'Europe/Warsaw', locations: defaultLocationCities(), rollingDays: 60,
     durationsDays: [2,3,4,5,6,7,8,9,10,11,12,13,14], fullEnabled: false, benchmarkStage: 3,
-    p50ScenarioSeconds: 15, p95ScenarioSeconds: 25, maxParallel: 3, targetChunkMinutes: 60,
+    p50ScenarioSeconds: 15, p95ScenarioSeconds: 25, averageOffersPerScenario: 49,
+    averageArtifactBytesPerScenario: 70359, maxParallel: 3, targetChunkMinutes: 60,
     maxBrowserMinutes: 100, now: new Date('2026-08-20T10:00:00+02:00')
   });
   assert.equal(plan.plan_only, true);
@@ -2326,7 +2328,8 @@ test('workflow planner cannot bypass the full-run gate browser budget or hard ca
   const full = {
     eventName: 'workflow_dispatch', planOnly: false, timeZone: 'Europe/Warsaw',
     locations: defaultLocationCities(), rollingDays: 60, durationsDays: [2,3,4,5,6,7,8,9,10,11,12,13,14],
-    benchmarkStage: 4, p50ScenarioSeconds: 15, p95ScenarioSeconds: 25, maxParallel: 3,
+    benchmarkStage: 4, p50ScenarioSeconds: 15, p95ScenarioSeconds: 25, averageOffersPerScenario: 49,
+    averageArtifactBytesPerScenario: 70359, maxParallel: 3,
     targetChunkMinutes: 60, maxBrowserMinutes: 3000, acknowledgeExpandedRun: true,
     now: new Date('2026-08-20T10:00:00+02:00')
   };
@@ -2341,7 +2344,8 @@ test('manual workflow gates expanded requests and ignores unsafe dispatch parall
   const common = {
     eventName: 'workflow_dispatch', timeZone: 'Europe/Warsaw', locations: ['Katowice'],
     rollingDays: 10, durationsDays: [2], fullEnabled: false, benchmarkStage: 4,
-    p50ScenarioSeconds: 2, p95ScenarioSeconds: 4, maxParallel: 3, manualMaxParallel: 99,
+    p50ScenarioSeconds: 2, p95ScenarioSeconds: 4, averageOffersPerScenario: 5.5,
+    averageArtifactBytesPerScenario: 1234, maxParallel: 3, manualMaxParallel: 99,
     targetChunkMinutes: 10, maxBrowserMinutes: 20, now: new Date('2026-08-20T10:00:00+02:00')
   };
   assert.throws(() => buildWorkflowPlan(common), /acknowledge_expanded_run=true/);
@@ -2362,7 +2366,8 @@ test('workflow planner rejects missing or invalid measured values for executing 
   const base = {
     eventName: 'workflow_dispatch', timeZone: 'Europe/Warsaw', locations: ['Katowice'], rollingDays: 10,
     durationsDays: [2], acknowledgeExpandedRun: true, benchmarkStage: 4, p50ScenarioSeconds: 2,
-    p95ScenarioSeconds: 4, maxParallel: 3, targetChunkMinutes: 10, maxBrowserMinutes: 20,
+    p95ScenarioSeconds: 4, averageOffersPerScenario: 5.5, averageArtifactBytesPerScenario: 1234,
+    maxParallel: 3, targetChunkMinutes: 10, maxBrowserMinutes: 20,
     now: new Date('2026-08-20T10:00:00+02:00')
   };
   for (const [field, value] of [
@@ -2430,7 +2435,8 @@ test('enabled scheduled runs require stage four even below the full matrix', () 
   const input = {
     eventName: 'schedule', timeZone: 'Europe/Warsaw', locations: ['Katowice'], rollingDays: 10,
     durationsDays: [2], fullEnabled: true, benchmarkStage: 3, p50ScenarioSeconds: 2,
-    p95ScenarioSeconds: 4, maxParallel: 2, targetChunkMinutes: 10, maxBrowserMinutes: 20,
+    p95ScenarioSeconds: 4, averageOffersPerScenario: 5.5, averageArtifactBytesPerScenario: 1234,
+    maxParallel: 2, targetChunkMinutes: 10, maxBrowserMinutes: 20,
     now: new Date('2026-08-20T10:00:00+02:00')
   };
   assert.throws(() => buildWorkflowPlan(input), /QEEQ_BENCHMARK_STAGE=4/);
@@ -2522,7 +2528,8 @@ test('workflow planner enforces GitHub timeout and parallelism boundaries withou
   const base = {
     eventName: 'workflow_dispatch', timeZone: 'Europe/Warsaw', locations: ['Katowice'],
     rollingDays: 10, durationsDays: [2], acknowledgeExpandedRun: true, benchmarkStage: 4,
-    p50ScenarioSeconds: 1000, p95ScenarioSeconds: 1400, maxParallel: 256,
+    p50ScenarioSeconds: 1000, p95ScenarioSeconds: 1400, averageOffersPerScenario: 5.5,
+    averageArtifactBytesPerScenario: 1234, maxParallel: 256,
     targetChunkMinutes: 234, maxBrowserMinutes: 1000,
     now: new Date('2026-08-20T10:00:00+02:00')
   };
@@ -3248,4 +3255,110 @@ test('HTML redacts credential headers and QEEQ location identifiers in untrusted
   assert.doesNotMatch(html, /Authorization|Cookie|qeeq_city_id/i);
   assert.match(html, /location_id_drift/);
   assert.match(html, /\[redacted\]/);
+});
+
+test('full workflow plans require measured capacity inputs and emit deterministic volume estimates', () => {
+  const { buildWorkflowPlan } = require('../src/qeeq/workflowPlan');
+  const { defaultLocationCities } = require('../src/qeeq/locations');
+  const base = {
+    eventName: 'workflow_dispatch', planOnly: true, acknowledgeExpandedRun: true,
+    timeZone: 'Europe/Warsaw', locations: defaultLocationCities(), rollingDays: 60,
+    durationsDays: [2,3,4,5,6,7,8,9,10,11,12,13,14], benchmarkStage: 4,
+    p50ScenarioSeconds: 15, p95ScenarioSeconds: 25, maxParallel: 3,
+    targetChunkMinutes: 60, maxBrowserMinutes: 3000,
+    now: new Date('2026-08-20T10:00:00+02:00')
+  };
+
+  assert.throws(() => buildWorkflowPlan(base), /averageOffersPerScenario.*positive finite/);
+  assert.throws(() => buildWorkflowPlan({ ...base, averageOffersPerScenario: 49 }), /averageArtifactBytesPerScenario.*positive finite/);
+  for (const [field, value] of [
+    ['averageOffersPerScenario', 0], ['averageOffersPerScenario', Infinity],
+    ['averageArtifactBytesPerScenario', -1], ['averageArtifactBytesPerScenario', NaN]
+  ]) {
+    assert.throws(() => buildWorkflowPlan({
+      ...base, averageOffersPerScenario: 49, averageArtifactBytesPerScenario: 70359, [field]: value
+    }), /positive finite/);
+  }
+
+  const plan = buildWorkflowPlan({
+    ...base, averageOffersPerScenario: 49, averageArtifactBytesPerScenario: 70359
+  });
+  assert.equal(plan.scenario_count, 7020);
+  assert.equal(plan.matrix.include.length, 60);
+  assert.equal(plan.chunk_timeout_minutes, 84);
+  assert.equal(plan.average_offers_per_scenario, 49);
+  assert.equal(plan.average_artifact_bytes_per_scenario, 70359);
+  assert.equal(plan.estimated_offer_volume, 343980);
+  assert.equal(plan.estimated_artifact_bytes, 493920180);
+});
+
+test('workflow planner CLI exposes measured capacity inputs in JSON console and GitHub outputs', () => {
+  const { spawnSync } = require('node:child_process');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-capacity-plan-'));
+  const script = path.resolve(__dirname, '../src/qeeq/workflowPlan.js');
+  const githubOutput = path.join(directory, 'github-output.txt');
+  try {
+    const args = [
+      '--event-name=workflow_dispatch', '--locations=Katowice', '--rolling-days=10', '--durations-days=2',
+      '--acknowledge-expanded-run=true', '--benchmark-stage=4', '--p50-scenario-seconds=2',
+      '--p95-scenario-seconds=4', '--average-offers-per-scenario=5.5',
+      '--average-artifact-bytes-per-scenario=1234', '--max-parallel=2', '--target-chunk-minutes=10',
+      '--max-browser-minutes=20', `--github-output=${githubOutput}`
+    ];
+    const result = spawnSync(process.execPath, [script, ...args], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const stdout = JSON.parse(result.stdout);
+    const outputs = fs.readFileSync(githubOutput, 'utf8');
+    assert.equal(stdout.average_offers_per_scenario, 5.5);
+    assert.equal(stdout.average_artifact_bytes_per_scenario, 1234);
+    assert.equal(stdout.estimated_offer_volume, 55);
+    assert.equal(stdout.estimated_artifact_bytes, 12340);
+    for (const expected of [
+      'average_offers_per_scenario=5.5', 'average_artifact_bytes_per_scenario=1234',
+      'estimated_offer_volume=55', 'estimated_artifact_bytes=12340'
+    ]) assert.match(outputs, new RegExp(`^${expected}$`, 'm'));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('smoke acceptance requires canonical success pass and a resolved verified public PLN offer', () => {
+  const { assertSmokeAcceptance } = require('../src/qeeq/smokeAcceptance');
+  const offer = {
+    provider_name: 'CARWIZ', price_tier: 'public', price_verified: true,
+    total_price: 119, currency: 'PLN'
+  };
+  const accepted = {
+    schema_version: 1, provider: 'qeeq.pl', run_status: 'success', quality_status: 'pass',
+    scenarios: [{ offers: [offer] }]
+  };
+  assert.deepEqual(assertSmokeAcceptance(accepted), { verified_public_pln_offer_count: 1 });
+
+  for (const payload of [
+    { ...accepted, run_status: 'partial' },
+    { ...accepted, quality_status: 'warning' },
+    { ...accepted, scenarios: [] },
+    { ...accepted, scenarios: [{ offers: [{ ...offer, provider_name: '   ' }] }] },
+    { ...accepted, scenarios: [{ offers: [{ ...offer, price_tier: 'conditional' }] }] },
+    { ...accepted, scenarios: [{ offers: [{ ...offer, price_verified: false }] }] },
+    { ...accepted, scenarios: [{ offers: [{ ...offer, total_price: Infinity }] }] },
+    { ...accepted, scenarios: [{ offers: [{ ...offer, currency: 'EUR' }] }] }
+  ]) assert.throws(() => assertSmokeAcceptance(payload), /Smoke acceptance failed/);
+});
+
+test('smoke workflow evaluates canonical acceptance but uploads diagnostics before final failure', () => {
+  const fs = require('node:fs');
+  const yaml = fs.readFileSync('.github/workflows/qeeq-smoke.yml', 'utf8');
+  const acceptance = yaml.indexOf('name: Evaluate canonical smoke acceptance');
+  const upload = yaml.indexOf('name: Upload smoke diagnostics');
+  const finalStatus = yaml.indexOf('name: Final status');
+  assert.ok(acceptance >= 0 && acceptance < upload && upload < finalStatus);
+  assert.match(yaml.slice(acceptance, upload), /continue-on-error:\s*true/);
+  assert.match(yaml.slice(acceptance, upload), /node src\/qeeq\/smokeAcceptance\.js --input=output\/qeeq-smoke\.json/);
+  assert.match(yaml.slice(upload, finalStatus), /if:\s*always\(\)/);
+  assert.match(yaml.slice(finalStatus), /ACCEPTANCE_OUTCOME:/);
+  assert.match(yaml.slice(finalStatus), /\$ACCEPTANCE_OUTCOME.*success/);
 });

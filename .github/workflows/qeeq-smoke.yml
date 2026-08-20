@@ -56,6 +56,11 @@ jobs:
         run: |
           node -e "const fs=require('node:fs');const {writeCsvReport}=require('./src/qeeq/report');writeCsvReport('output/qeeq-smoke.csv',JSON.parse(fs.readFileSync('output/qeeq-smoke.json','utf8')));"
           node src/qeeq/reportHtml.js output/qeeq-smoke.json output/qeeq-smoke.html
+      - name: Evaluate canonical smoke acceptance
+        id: acceptance
+        if: always()
+        continue-on-error: true
+        run: node src/qeeq/smokeAcceptance.js --input=output/qeeq-smoke.json
       - name: Upload smoke diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -78,7 +83,9 @@ jobs:
         shell: bash
         env:
           SCRAPE_CODE: ${{ steps.scrape.outputs.exit_code }}
+          ACCEPTANCE_OUTCOME: ${{ steps.acceptance.outcome }}
         run: |
+          if [ "$ACCEPTANCE_OUTCOME" != "success" ]; then exit 1; fi
           code="${SCRAPE_CODE:-1}"
           case "$code" in
             0|1|2) exit "$code" ;;
