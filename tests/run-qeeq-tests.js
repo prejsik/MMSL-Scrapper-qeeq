@@ -2737,3 +2737,146 @@ test('autocomplete resolver shares one absolute timeout between input and sugges
   assert.deepEqual(matches, []);
   assert.equal(nowMs <= 300, true);
 });
+
+test('current QEEQ LI date controls select scoped Warsaw dates without editing spans or submitting', async () => {
+  const { SELECTORS, setSearchParameters } = require('../src/qeeq/scraper');
+  const values = {
+    [SELECTORS.pickupDateValue]: '2026-09-20',
+    [SELECTORS.pickupTimeValue]: '10:00',
+    [SELECTORS.returnDateValue]: '2026-09-21',
+    [SELECTORS.returnTimeValue]: '10:00'
+  };
+  const selected = [];
+  let activeDate = null;
+  let fillAttempts = 0;
+  let popupVisible = true;
+  let submitClicks = 0;
+  const empty = { count: async () => 0, nth() { return this; }, first() { return this; } };
+  const collection = items => ({
+    count: async () => items.length,
+    nth: index => items[index],
+    first: () => items[0]
+  });
+  const dateControl = name => ({
+    isVisible: async () => true,
+    evaluate: async callback => callback({ tagName: 'LI' }),
+    click: async () => { activeDate = name; },
+    fill: async () => { fillAttempts += 1; throw new Error('LI is not editable'); }
+  });
+  const currentValue = (text, visible) => ({
+    isVisible: async () => visible,
+    inputValue: async () => { throw new Error('SPAN is not an input'); },
+    innerText: async () => text,
+    fill: async () => { fillAttempts += 1; throw new Error('SPAN is not editable'); },
+    selectOption: async () => { fillAttempts += 1; throw new Error('SPAN is not a select'); }
+  });
+  const hidden = selector => ({ inputValue: async () => values[selector] });
+  const day = value => ({
+    isVisible: async () => true,
+    innerText: async () => value,
+    getAttribute: async name => name === 'class' ? 'pmu-button' : null,
+    click: async () => {
+      const selector = activeDate === 'pickup' ? SELECTORS.pickupDateValue : SELECTORS.returnDateValue;
+      values[selector] = `2026-08-${value}`;
+      selected.push(activeDate);
+    }
+  });
+  const august = {
+    isVisible: async () => true,
+    locator: selector => selector === '.pmu-days .pmu-button' ? collection([day('22'), day('24')]) : empty
+  };
+  const months = {
+    filter: ({ hasText }) => hasText === 'Sierpień, 2026' ? collection([august]) : empty
+  };
+  const page = {
+    getByText(label) {
+      if (label !== 'Odrzuć nieobowiązkowe pliki cookie') return empty;
+      return collection([{
+        isVisible: async () => popupVisible,
+        click: async () => { popupVisible = false; }
+      }]);
+    },
+    getByLabel() { return empty; },
+    locator(selector) {
+      if (selector === SELECTORS.pickupDate) return collection([dateControl('pickup')]);
+      if (selector === SELECTORS.returnDate) return collection([dateControl('return')]);
+      if (selector === SELECTORS.pickupTime) return collection([currentValue('10:00', true)]);
+      if (selector === SELECTORS.returnTime) return collection([currentValue('10:00', true)]);
+      if (selector === SELECTORS.driverAge) return collection([currentValue('30-60', true)]);
+      if (selector === SELECTORS.residence) return collection([currentValue('PL', false)]);
+      if (Object.hasOwn(values, selector)) return collection([hidden(selector)]);
+      if (selector === SELECTORS.sameLocation) return empty;
+      if (selector === '.pmu-instance:visible') return months;
+      if (selector === '.pmu-next:visible') return empty;
+      if (selector === SELECTORS.submit) return collection([{ click: async () => { submitClicks += 1; } }]);
+      throw new Error(`unexpected selector: ${selector}`);
+    }
+  };
+
+  await setSearchParameters(page, {
+    pickupDate: '2026-08-22',
+    pickupTime: '10:00',
+    dropoffDate: '2026-08-24',
+    dropoffTime: '10:00'
+  }, { driverAge: '30-60', residenceCountryCode: 'PL' });
+
+  assert.deepEqual(selected, ['pickup', 'return']);
+  assert.equal(values[SELECTORS.pickupDateValue], '2026-08-22');
+  assert.equal(values[SELECTORS.returnDateValue], '2026-08-24');
+  assert.equal(fillAttempts, 0);
+  assert.equal(submitClicks, 0);
+  assert.equal(popupVisible, false);
+});
+
+test('current QEEQ LI time control uses the accessible half-hour slider and verifies hidden time', async () => {
+  const { SELECTORS, setSearchParameters } = require('../src/qeeq/scraper');
+  const values = {
+    [SELECTORS.pickupDateValue]: '2026-08-22',
+    [SELECTORS.pickupTimeValue]: '09:30',
+    [SELECTORS.returnDateValue]: '2026-08-24',
+    [SELECTORS.returnTimeValue]: '10:00'
+  };
+  const empty = { count: async () => 0, nth() { return this; }, first() { return this; } };
+  const collection = items => ({ count: async () => items.length, nth: index => items[index], first: () => items[0] });
+  const hidden = selector => ({ inputValue: async () => values[selector] });
+  let sliderValue = 19;
+  const pickupHandle = {
+    isVisible: async () => true,
+    press: async key => {
+      if (key === 'Home') sliderValue = 0;
+      if (key === 'ArrowRight') sliderValue += 1;
+      values[SELECTORS.pickupTimeValue] = `${String(Math.floor(sliderValue / 2)).padStart(2, '0')}:${sliderValue % 2 ? '30' : '00'}`;
+    }
+  };
+  const passiveHandle = { isVisible: async () => true, press: async () => { throw new Error('wrong time slider'); } };
+  const profile = value => ({
+    isVisible: async () => true,
+    inputValue: async () => { throw new Error('SPAN is not an input'); },
+    innerText: async () => value
+  });
+  const page = {
+    getByText() { return empty; },
+    getByLabel() { return empty; },
+    locator(selector) {
+      if (Object.hasOwn(values, selector)) return collection([hidden(selector)]);
+      if (selector === SELECTORS.pickupTime) return collection([{
+        isVisible: async () => true,
+        evaluate: async callback => callback({ tagName: 'LI' }),
+        click: async () => {}
+      }]);
+      if (selector === SELECTORS.timeSlider) return collection([pickupHandle, passiveHandle]);
+      if (selector === SELECTORS.sameLocation) return empty;
+      if (selector === SELECTORS.driverAge) return collection([profile('30-60')]);
+      if (selector === SELECTORS.residence) return collection([profile('PL')]);
+      throw new Error(`unexpected selector: ${selector}`);
+    }
+  };
+
+  await setSearchParameters(page, {
+    pickupDate: '2026-08-22', pickupTime: '10:00',
+    dropoffDate: '2026-08-24', dropoffTime: '10:00'
+  }, { driverAge: '30-60', residenceCountryCode: 'PL' });
+
+  assert.equal(values[SELECTORS.pickupTimeValue], '10:00');
+  assert.equal(sliderValue, 20);
+});

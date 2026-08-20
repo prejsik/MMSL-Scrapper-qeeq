@@ -13,6 +13,10 @@ const SELECTORS = Object.freeze({
   pickupTimeValue: 'input[name="from_date_1"]',
   returnDateValue: 'input[name="to_date_0"]',
   returnTimeValue: 'input[name="to_date_1"]',
+  calendarMonth: '.pmu-instance:visible',
+  calendarNext: '.pmu-next:visible',
+  calendarDay: '.pmu-days .pmu-button',
+  timeSlider: '.slider-handle[role="slider"]:visible',
   sameLocation: '.J-all-the-place',
   driverAge: '.J-search-age-input',
   residence: '.J-search-region-input',
@@ -440,6 +444,14 @@ function errorCodeFor(error) {
 
 async function setProfileControl(page, primarySelector, label, value) {
   const primary = page.locator(primarySelector);
+  if (await primary.count()) {
+    const current = primary.first ? primary.first() : primary.nth(0);
+    try {
+      if (normalizeText(await current.inputValue()) === value) return;
+    } catch {
+      if (normalizeText(await current.innerText()) === value) return;
+    }
+  }
   const control = await firstVisibleLocator(primary)
     || await firstVisibleLocator(page.getByLabel(label, { exact: true }));
   if (!control) throw controlledError('search_parameter_mismatch');
@@ -451,22 +463,119 @@ async function setProfileControl(page, primarySelector, label, value) {
   if (await control.inputValue() !== value) throw controlledError('search_parameter_mismatch');
 }
 
-async function setSearchParameters(page, scenario, config) {
-  const values = [
-    [SELECTORS.pickupDate, SELECTORS.pickupDateValue, scenario.pickupDate],
-    [SELECTORS.pickupTime, SELECTORS.pickupTimeValue, scenario.pickupTime],
-    [SELECTORS.returnDate, SELECTORS.returnDateValue, scenario.dropoffDate],
-    [SELECTORS.returnTime, SELECTORS.returnTimeValue, scenario.dropoffTime]
-  ];
-  for (const [controlSelector, hiddenSelector, expected] of values) {
-    const control = await firstVisibleLocator(page.locator(controlSelector));
-    if (!control) throw controlledError('search_parameter_mismatch');
-    await control.fill(expected);
-    const storedValue = page.locator(hiddenSelector);
-    if (await storedValue.count() === 0) throw controlledError('search_parameter_mismatch');
-    const actual = await storedValue.first().inputValue();
-    if (actual !== expected) throw controlledError('search_parameter_mismatch');
+const POLISH_MONTHS = Object.freeze([
+  'Styczeń', 'Luty', 'Marzec', 'Kwiecień', 'Maj', 'Czerwiec',
+  'Lipiec', 'Sierpień', 'Wrzesień', 'Październik', 'Listopad', 'Grudzień'
+]);
+
+function calendarDateParts(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ''));
+  if (!match) throw controlledError('search_parameter_mismatch');
+  return { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) };
+}
+
+async function hiddenInputValue(page, selector) {
+  const stored = page.locator(selector);
+  if (await stored.count() === 0) throw controlledError('search_parameter_mismatch');
+  return stored.first().inputValue();
+}
+
+async function locatorTagName(locator) {
+  try {
+    const value = await locator.evaluate(element => element.tagName);
+    return typeof value === 'string' ? value.toUpperCase() : '';
+  } catch {
+    return '';
   }
+}
+
+async function visibleCalendarMonth(page, label) {
+  return firstVisibleLocator(page.locator(SELECTORS.calendarMonth).filter({ hasText: label }));
+}
+
+async function visibleCalendarDay(month, expectedDay) {
+  const days = month.locator(SELECTORS.calendarDay);
+  for (let index = 0; index < await days.count(); index += 1) {
+    const candidate = days.nth(index);
+    if (!await candidate.isVisible()) continue;
+    if (normalizeText(await candidate.innerText()) !== expectedDay) continue;
+    const classes = normalizeText(await candidate.getAttribute('class'));
+    if (/pmu-(?:disabled|not-in-month)/.test(classes)) continue;
+    return candidate;
+  }
+  return null;
+}
+
+async function selectCalendarDate(page, controlSelector, hiddenSelector, expected) {
+  if (await hiddenInputValue(page, hiddenSelector) === expected) return;
+  const { year, month, day } = calendarDateParts(expected);
+  const label = `${POLISH_MONTHS[month - 1]}, ${year}`;
+  if (!POLISH_MONTHS[month - 1]) throw controlledError('search_parameter_mismatch');
+  await dismissPolishPopups(page);
+  const control = await firstVisibleLocator(page.locator(controlSelector));
+  if (!control) throw controlledError('search_parameter_mismatch');
+  if (await locatorTagName(control) !== 'LI') {
+    await control.fill(expected);
+    if (await hiddenInputValue(page, hiddenSelector) !== expected) throw controlledError('search_parameter_mismatch');
+    return;
+  }
+  await control.click();
+
+  for (let navigation = 0; navigation < 14; navigation += 1) {
+    let targetMonth = await visibleCalendarMonth(page, label);
+    if (targetMonth) {
+      await dismissPolishPopups(page);
+      targetMonth = await visibleCalendarMonth(page, label);
+      const targetDay = targetMonth && await visibleCalendarDay(targetMonth, String(day));
+      if (!targetDay) throw controlledError('search_parameter_mismatch');
+      await targetDay.click();
+      if (await hiddenInputValue(page, hiddenSelector) !== expected) throw controlledError('search_parameter_mismatch');
+      return;
+    }
+    const next = await firstVisibleLocator(page.locator(SELECTORS.calendarNext));
+    if (!next) break;
+    await next.click();
+  }
+  throw controlledError('search_parameter_mismatch');
+}
+
+async function visibleLocatorAt(locator, visibleIndex) {
+  let found = 0;
+  for (let index = 0; index < await locator.count(); index += 1) {
+    const candidate = locator.nth(index);
+    if (!await candidate.isVisible()) continue;
+    if (found === visibleIndex) return candidate;
+    found += 1;
+  }
+  return null;
+}
+
+async function setTimeControl(page, controlSelector, hiddenSelector, expected, sliderIndex) {
+  if (await hiddenInputValue(page, hiddenSelector) === expected) return;
+  const control = await firstVisibleLocator(page.locator(controlSelector));
+  if (!control) throw controlledError('search_parameter_mismatch');
+  if (await locatorTagName(control) !== 'LI') {
+    await control.fill(expected);
+    if (await hiddenInputValue(page, hiddenSelector) !== expected) throw controlledError('search_parameter_mismatch');
+    return;
+  }
+  const match = /^(\d{2}):(00|30)$/.exec(String(expected || ''));
+  if (!match) throw controlledError('search_parameter_mismatch');
+  await dismissPolishPopups(page);
+  await control.click();
+  const handle = await visibleLocatorAt(page.locator(SELECTORS.timeSlider), sliderIndex);
+  if (!handle) throw controlledError('search_parameter_mismatch');
+  await handle.press('Home');
+  const steps = Number(match[1]) * 2 + (match[2] === '30' ? 1 : 0);
+  for (let step = 0; step < steps; step += 1) await handle.press('ArrowRight');
+  if (await hiddenInputValue(page, hiddenSelector) !== expected) throw controlledError('search_parameter_mismatch');
+}
+
+async function setSearchParameters(page, scenario, config) {
+  await selectCalendarDate(page, SELECTORS.pickupDate, SELECTORS.pickupDateValue, scenario.pickupDate);
+  await selectCalendarDate(page, SELECTORS.returnDate, SELECTORS.returnDateValue, scenario.dropoffDate);
+  await setTimeControl(page, SELECTORS.pickupTime, SELECTORS.pickupTimeValue, scenario.pickupTime, 0);
+  await setTimeControl(page, SELECTORS.returnTime, SELECTORS.returnTimeValue, scenario.dropoffTime, 1);
   const sameLocation = page.locator(SELECTORS.sameLocation);
   const visibleSameLocation = await firstVisibleLocator(sameLocation);
   if (visibleSameLocation && !await visibleSameLocation.isChecked()) await visibleSameLocation.click();
@@ -838,5 +947,6 @@ module.exports = {
   snapshotOfferSubtree,
   resolveSelectedAirportMatches,
   resolveVisibleAirportMatches,
+  setSearchParameters,
   visibleAirportSuggestions
 };
