@@ -929,3 +929,42 @@ test('browser-backed validator closes both resources with correct error preceden
   assert.equal(cleanupFailure.contextCloseAttempts, 1);
   assert.equal(cleanupFailure.browserCloseAttempts, 1);
 });
+
+test('unchanged exact autocomplete present before fill is rejected as stale by scraper and validator', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const { validateLiveLocationCatalog } = require('../src/qeeq/validateLocations');
+
+  const scraperFake = createFakeQeeqBrowser({ staleExactSuggestion: true });
+  const outcome = await new QeeqScraper(task5Config({ resultsTimeoutMs: 200 }), {
+    launchBrowser: scraperFake.launchBrowser, now: scraperFake.now, sleep: scraperFake.sleep
+  }).runScenario(task5Scenario());
+  assert.equal(outcome.error_code, 'location_match_missing');
+  assert.equal(scraperFake.selectedSuggestionIata, null);
+
+  const validatorFake = createFakeQeeqBrowser({ staleExactSuggestion: true });
+  const validation = await validateLiveLocationCatalog(task5Config({ resultsTimeoutMs: 200 }), {
+    launchBrowser: validatorFake.launchBrowser, now: validatorFake.now, sleep: validatorFake.sleep
+  });
+  assert.equal(validation.validation_status, 'fail');
+  assert.equal(validation.airports.find(item => item.iata === 'KTW').error_code, 'location_match_missing');
+  assert.equal(validatorFake.submitted, false);
+});
+
+test('search uses only visible pickup date time and submit controls when hidden duplicates come first', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({ hiddenFirstControls: true });
+  const outcome = await new QeeqScraper(task5Config(), {
+    launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep
+  }).runScenario(task5Scenario());
+
+  assert.equal(outcome.status, 'success');
+  const interactiveActions = fake.actions.filter(action =>
+    (action[0] === 'fill' && ['pickupInput', 'dateOrTime'].includes(action[1]))
+    || (action[0] === 'click' && action[1] === 'submit'));
+  assert.equal(interactiveActions.filter(action => action[1] === 'pickupInput').length, 2);
+  assert.equal(interactiveActions.filter(action => action[1] === 'dateOrTime').length, 4);
+  assert.equal(interactiveActions.filter(action => action[1] === 'submit').length, 1);
+  assert.equal(interactiveActions.every(action => action[3] === 1), true);
+});

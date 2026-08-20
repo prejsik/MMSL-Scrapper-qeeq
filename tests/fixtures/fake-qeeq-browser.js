@@ -97,6 +97,7 @@ function createFakeQeeqBrowser(options = {}) {
         && state.loadMoreCounts.at(-1) === state.loadMoreCounts.at(-2);
       if (this.kind === 'suggestions') return this.page.suggestions().length;
       if (this.kind === 'popup') return this.page.popups[this.data.label] ? (state.hiddenFirstControls ? 2 : 1) : 0;
+      if (['pickupInput', 'dateOrTime', 'submit'].includes(this.kind)) return state.hiddenFirstControls ? 2 : 1;
       if (this.kind === 'loadMore') return !state.loadMoreDisappeared && (state.pendingGroupCount !== null || state.loadMoreClicks < state.loadMoreCounts.length - 1 || terminalLoadMoreStall) ? 1 : 0;
       if (this.kind === 'profile') return state.primaryProfileControls ? (state.hiddenFirstControls ? 2 : 1) : 0;
       if (this.kind === 'semanticProfile') return state.primaryProfileControls ? 0 : (state.hiddenFirstControls ? 2 : 1);
@@ -112,7 +113,8 @@ function createFakeQeeqBrowser(options = {}) {
         && state.loadMoreCounts.length > 1
         && state.loadMoreCounts.at(-1) === state.loadMoreCounts.at(-2);
       if (this.kind === 'suggestion') return this.data.visible;
-      if (['popup', 'profile', 'semanticProfile'].includes(this.kind) && state.hiddenFirstControls && this.data.index === 0) return false;
+      if (['popup', 'profile', 'semanticProfile', 'pickupInput', 'dateOrTime', 'submit'].includes(this.kind)
+        && state.hiddenFirstControls && this.data.index === 0) return false;
       if (this.kind === 'popup') return Boolean(this.page.popups[this.data.label]);
       if (this.kind === 'loadMore') return !state.loadMoreDisappeared && (state.pendingGroupCount !== null || state.loadMoreClicks < state.loadMoreCounts.length - 1 || terminalLoadMoreStall);
       if (this.kind === 'reserveAnchor') return (await this.count()) > 0 && this.page.expansionPollsRemaining === 0;
@@ -147,7 +149,10 @@ function createFakeQeeqBrowser(options = {}) {
     }
 
     async fill(value) {
-      state.actions.push(['fill', this.kind, value]);
+      if (state.hiddenFirstControls && ['pickupInput', 'dateOrTime'].includes(this.kind) && this.data.index === undefined) {
+        throw new Error('strict_mode_violation');
+      }
+      state.actions.push(['fill', this.kind, value, this.data.index ?? 0]);
       if (this.kind === 'pickupInput') {
         this.page.pickupQuery = value;
         this.page.autocompletePollsRemaining = options.autocompleteDelayPolls || 0;
@@ -167,7 +172,10 @@ function createFakeQeeqBrowser(options = {}) {
     }
 
     async click() {
-      state.actions.push(['click', this.kind, this.data.label || this.data.iata || null]);
+      if (state.hiddenFirstControls && this.kind === 'submit' && this.data.index === undefined) {
+        throw new Error('strict_mode_violation');
+      }
+      state.actions.push(['click', this.kind, this.data.label || this.data.iata || null, this.data.index ?? 0]);
       if (this.kind === 'suggestion') state.selectedSuggestionIata = this.data.iata;
       if (this.kind === 'popup') {
         this.page.popups[this.data.label] = false;
@@ -253,7 +261,7 @@ function createFakeQeeqBrowser(options = {}) {
       this.sameLocation = false;
       this.groupOpen = options.initiallyOpen === true;
       this.expansionPollsRemaining = 0;
-      this.pickupQuery = '';
+      this.pickupQuery = null;
       this.autocompletePollsRemaining = 0;
       this.popups = {
         'Odrzuć nieobowiązkowe pliki cookie': true,
@@ -264,7 +272,12 @@ function createFakeQeeqBrowser(options = {}) {
 
     suggestions() {
       const stale = { visible: false, iata: 'WRO', label: 'Lotnisko we Wrocławiu' };
+      if (options.staleExactSuggestion) {
+        const exact = airportFixture.find(item => item.iata === 'KTW');
+        return [stale, { ...exact, visible: true }];
+      }
       if (this.autocompletePollsRemaining > 0) return [stale];
+      if (!this.pickupQuery) return [stale];
       const queryIata = String(this.pickupQuery || '').trim().toUpperCase();
       const normalizedQuery = String(this.pickupQuery || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
       const fixtureMatch = airportFixture.find(item => item.iata === queryIata)

@@ -107,18 +107,36 @@ function matchingAirportSuggestions(suggestions, airport) {
   });
 }
 
+function airportSuggestionFingerprint(suggestions) {
+  return suggestions.map(item => [
+    item.iata,
+    normalizeLocationKey(item.label),
+    normalizeLocationKey(item.city),
+    normalizeText(item.landmark),
+    normalizeText(item.type)
+  ].join('\u0000')).sort().join('\u0001');
+}
+
 async function resolveVisibleAirportMatches(page, airport, options = {}) {
-  await page.locator(SELECTORS.pickupInput).fill(airport.label || airport.iata);
+  const pickupInput = await firstVisibleLocator(page.locator(SELECTORS.pickupInput));
+  if (!pickupInput) return [];
   const timeoutMs = options.timeoutMs ?? 30000;
   const sleep = options.sleep || (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)));
   const pollMs = 100;
   const maximumPolls = Math.max(1, Math.ceil(timeoutMs / pollMs));
+  const beforeFingerprint = airportSuggestionFingerprint(await visibleAirportSuggestions(page));
+  await pickupInput.fill('');
+  let refreshObserved = airportSuggestionFingerprint(await visibleAirportSuggestions(page)) !== beforeFingerprint;
+  await pickupInput.fill(airport.label || airport.iata);
   let matches = [];
   for (let poll = 0; poll <= maximumPolls; poll += 1) {
-    matches = matchingAirportSuggestions(await visibleAirportSuggestions(page), airport);
-    if (matches.length > 0 || poll === maximumPolls) break;
+    const suggestions = await visibleAirportSuggestions(page);
+    refreshObserved ||= airportSuggestionFingerprint(suggestions) !== beforeFingerprint;
+    matches = matchingAirportSuggestions(suggestions, airport);
+    if ((refreshObserved && matches.length > 0) || poll === maximumPolls) break;
     await sleep(Math.min(pollMs, timeoutMs));
   }
+  if (!refreshObserved) return [];
   return matchingAirportSuggestions(await visibleAirportSuggestions(page), airport);
 }
 
@@ -347,8 +365,12 @@ async function setSearchParameters(page, scenario, config) {
     [SELECTORS.returnTime, SELECTORS.returnTimeValue, scenario.dropoffTime]
   ];
   for (const [controlSelector, hiddenSelector, expected] of values) {
-    await page.locator(controlSelector).fill(expected);
-    const actual = await page.locator(hiddenSelector).inputValue();
+    const control = await firstVisibleLocator(page.locator(controlSelector));
+    if (!control) throw controlledError('search_parameter_mismatch');
+    await control.fill(expected);
+    const storedValue = page.locator(hiddenSelector);
+    if (await storedValue.count() === 0) throw controlledError('search_parameter_mismatch');
+    const actual = await storedValue.first().inputValue();
     if (actual !== expected) throw controlledError('search_parameter_mismatch');
   }
   const sameLocation = page.locator(SELECTORS.sameLocation);
@@ -638,7 +660,9 @@ class QeeqScraper {
         this.config.apiObservationTimeoutMs ?? 30000,
         () => new Date(this.now()).getTime()
       );
-      await page.locator(SELECTORS.submit).click();
+      const submit = await firstVisibleLocator(page.locator(SELECTORS.submit));
+      if (!submit) throw controlledError('search_parameter_mismatch');
+      await submit.click();
       await page.waitForURL(/\/car\/search\?id=/, { timeout: this.config.resultsTimeoutMs ?? 60000 });
       await page.waitForSelector(SELECTORS.group, { timeout: this.config.resultsTimeoutMs ?? 60000 });
       const sourceSearchUrl = sanitizeSourceUrl(page.url());
