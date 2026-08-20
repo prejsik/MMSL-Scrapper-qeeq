@@ -1,0 +1,86 @@
+name: QEEQ bounded smoke
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "src/qeeq/**"
+      - "tests/run-qeeq-tests.js"
+      - "qeeq.config.example.json"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/qeeq-smoke.yml"
+      - ".github/workflows/qeeq-daily.yml"
+
+permissions:
+  contents: read
+
+env:
+  TZ: Europe/Warsaw
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Run offline tests
+        run: npm test
+      - name: Record tomorrow in Warsaw
+        id: pickup
+        shell: bash
+        run: |
+          pickup_date="$(TZ=Europe/Warsaw date -d tomorrow +%F)"
+          echo "pickup_date=${pickup_date}" >> "$GITHUB_OUTPUT"
+      - name: Run bounded Katowice smoke
+        id: scrape
+        shell: bash
+        run: |
+          mkdir -p output artifacts/qeeq
+          set +e
+          node src/qeeq/run.js --config=qeeq.config.example.json --locations=Katowice --start-dates="${{ steps.pickup.outputs.pickup_date }}" --durations-days=2 --save=output/qeeq-smoke.json
+          code=$?
+          set -e
+          echo "exit_code=${code}" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$code" > output/exit-code.txt
+      - name: Generate bounded reports
+        if: always() && hashFiles('output/qeeq-smoke.json') != ''
+        shell: bash
+        run: |
+          node -e "const fs=require('node:fs');const {writeCsvReport}=require('./src/qeeq/report');writeCsvReport('output/qeeq-smoke.csv',JSON.parse(fs.readFileSync('output/qeeq-smoke.json','utf8')));"
+          node src/qeeq/reportHtml.js output/qeeq-smoke.json output/qeeq-smoke.html
+      - name: Upload smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qeeq-smoke-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            output/qeeq-smoke.json
+            output/qeeq-smoke.csv
+            output/qeeq-smoke.html
+            output/exit-code.txt
+            artifacts/qeeq/**/*.log
+            artifacts/qeeq/**/*screenshot*
+            artifacts/qeeq/**/*sanitized*
+            artifacts/qeeq/**/*dom*
+            artifacts/qeeq/**/*error*
+      - name: Final status
+        if: always()
+        shell: bash
+        env:
+          SCRAPE_CODE: ${{ steps.scrape.outputs.exit_code }}
+        run: |
+          code="${SCRAPE_CODE:-1}"
+          case "$code" in
+            0|1|2) exit "$code" ;;
+            *) exit 1 ;;
+          esac

@@ -2227,3 +2227,232 @@ test('Telegram summary CLI prints exactly one sanitized message and plan failure
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('smoke workflow is bounded to KTW two-day output and has no Pages or Telegram', () => {
+  const fs = require('node:fs');
+  const yaml = fs.readFileSync('.github/workflows/qeeq-smoke.yml', 'utf8');
+  assert.match(yaml, /Katowice/);
+  assert.match(yaml, /durations-days=2/);
+  assert.match(yaml, /npm test/);
+  assert.match(yaml, /Europe\/Warsaw/);
+  assert.match(yaml, /retention-days:\s*7/);
+  assert.match(yaml, /set \+e/);
+  assert.match(yaml, /if:\s*always\(\)/);
+  assert.doesNotMatch(yaml, /deploy-pages|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID/);
+});
+
+test('daily workflow is planner-driven gated and preserves all required outputs', () => {
+  const fs = require('node:fs');
+  const yaml = fs.readFileSync('.github/workflows/qeeq-daily.yml', 'utf8');
+  for (const required of [
+    'QEEQ_FULL_SCHEDULE_ENABLED', 'QEEQ_BENCHMARK_STAGE', 'QEEQ_P50_SCENARIO_SECONDS',
+    'QEEQ_P95_SCENARIO_SECONDS', 'QEEQ_MAX_BROWSER_MINUTES', 'QEEQ_MAX_PARALLEL',
+    'QEEQ_TARGET_CHUNK_MINUTES', 'QEEQ_PAGES_ENABLED', 'Europe/Warsaw', 'set +e',
+    'expected-scenario-keys.json', 'output/qeeq-results.csv', 'qeeq-results-latest.json',
+    'qeeq-report.html', 'qeeq-summary.xlsx', 'quality-summary.json', 'run-manifest.json'
+  ]) assert.match(yaml, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(yaml, /SCHEDULE_ROLLING_DAYS:\s*["']60["']/);
+  assert.match(yaml, /SCHEDULE_DURATIONS:\s*["']2,3,4,5,6,7,8,9,10,11,12,13,14["']/);
+  assert.match(yaml, /notify-plan-failure:/);
+  assert.match(yaml, /final-status:/);
+  assert.match(yaml, /max-parallel:/);
+  assert.doesNotMatch(yaml, /max-parallel:\s*2(?:\s|$)/);
+  assert.match(yaml, /retention-days:\s*7/);
+  assert.match(yaml, /retention-days:\s*30/);
+  assert.match(yaml, /pages:\s*write/);
+  assert.match(yaml, /id-token:\s*write/);
+  assert.match(yaml, /actions\/configure-pages@/);
+  assert.match(yaml, /actions\/upload-pages-artifact@/);
+  assert.match(yaml, /actions\/deploy-pages@/);
+  assert.match(yaml, /environment:[\s\S]*name:\s*github-pages/);
+  assert.match(yaml, /npm run qeeq:plan/);
+  assert.match(yaml, /--expected-keys-file=expected-scenario-keys\.json/);
+  assert.doesNotMatch(yaml, /\beval\b/);
+});
+
+test('manual daily dispatch defaults to one bounded KTW two-day run', () => {
+  const fs = require('node:fs');
+  const yaml = fs.readFileSync('.github/workflows/qeeq-daily.yml', 'utf8');
+  assert.match(yaml, /workflow_dispatch:[\s\S]*locations:[\s\S]*default:\s*Katowice/);
+  assert.match(yaml, /rolling_days:[\s\S]*default:\s*["']?1["']?/);
+  assert.match(yaml, /durations_days:[\s\S]*default:\s*["']?2["']?/);
+  assert.match(yaml, /max_parallel:[\s\S]*default:\s*["']?1["']?/);
+  assert.match(yaml, /acknowledge_expanded_run:[\s\S]*default:\s*false/);
+  assert.match(yaml, /plan_only:[\s\S]*default:\s*false/);
+});
+
+test('workflow planner partitions every full-run date into at most 256 consecutive chunks', () => {
+  const { buildWorkflowPlan } = require('../src/qeeq/workflowPlan');
+  const { defaultLocationCities } = require('../src/qeeq/locations');
+  const plan = buildWorkflowPlan({
+    eventName: 'schedule', timeZone: 'Europe/Warsaw', locations: defaultLocationCities(), rollingDays: 60,
+    durationsDays: [2,3,4,5,6,7,8,9,10,11,12,13,14], fullEnabled: true, benchmarkStage: 4,
+    p50ScenarioSeconds: 15, p95ScenarioSeconds: 25, maxParallel: 3, targetChunkMinutes: 60,
+    maxBrowserMinutes: 3000, now: new Date('2026-08-20T10:00:00+02:00')
+  });
+  assert.equal(plan.scenario_count, 7020);
+  assert.equal(plan.should_run, true);
+  assert.ok(plan.matrix.include.length <= 256);
+  const dates = plan.matrix.include.flatMap(chunk => chunk.start_dates.split(','));
+  assert.equal(dates.length, 60);
+  assert.equal(new Set(dates).size, 60);
+  assert.equal(plan.max_parallel, 3);
+  assert.ok(plan.chunk_timeout_minutes > 0);
+  assert.equal(plan.matrix.include[0].start_dates.split(',')[0], '2026-08-21');
+  assert.equal(plan.expected_scenario_keys.length, 7020);
+  assert.equal(plan.matrix.include.every((chunk, index) => chunk.chunk_id === `chunk-${String(index + 1).padStart(3, '0')}`), true);
+});
+
+test('stage three can produce a full plan-only estimate without enabling production', () => {
+  const { buildWorkflowPlan } = require('../src/qeeq/workflowPlan');
+  const { defaultLocationCities } = require('../src/qeeq/locations');
+  const plan = buildWorkflowPlan({
+    eventName: 'workflow_dispatch', planOnly: true, acknowledgeExpandedRun: true,
+    timeZone: 'Europe/Warsaw', locations: defaultLocationCities(), rollingDays: 60,
+    durationsDays: [2,3,4,5,6,7,8,9,10,11,12,13,14], fullEnabled: false, benchmarkStage: 3,
+    p50ScenarioSeconds: 15, p95ScenarioSeconds: 25, maxParallel: 3, targetChunkMinutes: 60,
+    maxBrowserMinutes: 100, now: new Date('2026-08-20T10:00:00+02:00')
+  });
+  assert.equal(plan.plan_only, true);
+  assert.equal(plan.should_run, false);
+  assert.equal(plan.scenario_count, 7020);
+  assert.equal(plan.budget_ok, false);
+  assert.ok(plan.estimated_browser_minutes > 100);
+});
+
+test('workflow planner cannot bypass the full-run gate browser budget or hard cap', () => {
+  const { buildWorkflowPlan } = require('../src/qeeq/workflowPlan');
+  const { defaultLocationCities } = require('../src/qeeq/locations');
+  const full = {
+    eventName: 'workflow_dispatch', planOnly: false, timeZone: 'Europe/Warsaw',
+    locations: defaultLocationCities(), rollingDays: 60, durationsDays: [2,3,4,5,6,7,8,9,10,11,12,13,14],
+    benchmarkStage: 4, p50ScenarioSeconds: 15, p95ScenarioSeconds: 25, maxParallel: 3,
+    targetChunkMinutes: 60, maxBrowserMinutes: 3000, acknowledgeExpandedRun: true,
+    now: new Date('2026-08-20T10:00:00+02:00')
+  };
+  assert.throws(() => buildWorkflowPlan({ ...full, fullEnabled: false }), /QEEQ_FULL_SCHEDULE_ENABLED=true/);
+  assert.throws(() => buildWorkflowPlan({ ...full, fullEnabled: true, benchmarkStage: 3 }), /QEEQ_BENCHMARK_STAGE=4/);
+  assert.throws(() => buildWorkflowPlan({ ...full, fullEnabled: true, maxBrowserMinutes: 100 }), /browser-minute budget/);
+  assert.throws(() => buildWorkflowPlan({ ...full, fullEnabled: true, rollingDays: 61 }), /exceeds hard cap 7020/);
+});
+
+test('manual workflow gates expanded requests and ignores unsafe dispatch parallelism', () => {
+  const { buildWorkflowPlan } = require('../src/qeeq/workflowPlan');
+  const common = {
+    eventName: 'workflow_dispatch', timeZone: 'Europe/Warsaw', locations: ['Katowice'],
+    rollingDays: 10, durationsDays: [2], fullEnabled: false, benchmarkStage: 4,
+    p50ScenarioSeconds: 2, p95ScenarioSeconds: 4, maxParallel: 3, manualMaxParallel: 99,
+    targetChunkMinutes: 10, maxBrowserMinutes: 20, now: new Date('2026-08-20T10:00:00+02:00')
+  };
+  assert.throws(() => buildWorkflowPlan(common), /acknowledge_expanded_run=true/);
+  const expanded = buildWorkflowPlan({ ...common, acknowledgeExpandedRun: true });
+  assert.equal(expanded.scenario_count, 10);
+  assert.equal(expanded.max_parallel, 3);
+  const safe = buildWorkflowPlan({
+    eventName: 'workflow_dispatch', timeZone: 'Europe/Warsaw', locations: ['Katowice'], rollingDays: 1,
+    durationsDays: [2], manualMaxParallel: 99, now: new Date('2026-08-20T10:00:00+02:00')
+  });
+  assert.equal(safe.should_run, true);
+  assert.equal(safe.max_parallel, 1);
+  assert.equal(safe.matrix.include.length, 1);
+});
+
+test('workflow planner rejects missing or invalid measured values for executing expanded runs', () => {
+  const { buildWorkflowPlan } = require('../src/qeeq/workflowPlan');
+  const base = {
+    eventName: 'workflow_dispatch', timeZone: 'Europe/Warsaw', locations: ['Katowice'], rollingDays: 10,
+    durationsDays: [2], acknowledgeExpandedRun: true, benchmarkStage: 4, p50ScenarioSeconds: 2,
+    p95ScenarioSeconds: 4, maxParallel: 3, targetChunkMinutes: 10, maxBrowserMinutes: 20,
+    now: new Date('2026-08-20T10:00:00+02:00')
+  };
+  for (const [field, value] of [
+    ['p50ScenarioSeconds', 0], ['p95ScenarioSeconds', Infinity], ['maxParallel', 1.5],
+    ['targetChunkMinutes', -1], ['maxBrowserMinutes', NaN]
+  ]) assert.throws(() => buildWorkflowPlan({ ...base, [field]: value }), /positive finite|positive integer/);
+  assert.throws(() => buildWorkflowPlan({ ...base, p50ScenarioSeconds: 5, p95ScenarioSeconds: 4 }), /p95.*p50/);
+  assert.throws(() => buildWorkflowPlan({ ...base, timeZone: 'UTC' }), /Europe\/Warsaw/);
+});
+
+test('disabled schedule is a successful non-running plan and date partition validates its boundary', () => {
+  const { buildWorkflowPlan, partitionDates } = require('../src/qeeq/workflowPlan');
+  const { defaultLocationCities } = require('../src/qeeq/locations');
+  assert.deepEqual(partitionDates(['2026-08-21', '2026-08-22', '2026-08-23'], 2), [
+    ['2026-08-21', '2026-08-22'], ['2026-08-23']
+  ]);
+  assert.throws(() => partitionDates(['2026-08-21'], 0), /positive integer/);
+  const plan = buildWorkflowPlan({
+    eventName: 'schedule', timeZone: 'Europe/Warsaw', locations: defaultLocationCities(),
+    rollingDays: 60, durationsDays: [2,3,4,5,6,7,8,9,10,11,12,13,14], fullEnabled: false,
+    benchmarkStage: 0, now: new Date('2026-08-20T10:00:00+02:00')
+  });
+  assert.equal(plan.should_run, false);
+  assert.equal(plan.scenario_count, 7020);
+  assert.deepEqual(plan.matrix, { include: [] });
+  assert.match(plan.summary, /disabled/i);
+});
+
+test('workflow planner CLI writes atomic plan expected keys and injection-safe GitHub outputs', () => {
+  const { spawnSync } = require('node:child_process');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-workflow-plan-'));
+  const script = path.resolve(__dirname, '../src/qeeq/workflowPlan.js');
+  const planPath = path.join(directory, 'plan.json');
+  const keysPath = path.join(directory, 'expected.json');
+  const outputsPath = path.join(directory, 'github-output.txt');
+  try {
+    const result = spawnSync(process.execPath, [script,
+      '--event-name=workflow_dispatch', '--time-zone=Europe/Warsaw', '--locations=Katowice',
+      '--rolling-days=1', '--durations-days=2', '--manual-max-parallel=1',
+      `--output=${planPath}`, `--expected-keys-output=${keysPath}`, `--github-output=${outputsPath}`
+    ], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const plan = JSON.parse(fs.readFileSync(planPath, 'utf8'));
+    const keys = JSON.parse(fs.readFileSync(keysPath, 'utf8'));
+    const outputs = fs.readFileSync(outputsPath, 'utf8');
+    assert.equal(plan.scenario_count, 1);
+    assert.deepEqual(keys, plan.expected_scenario_keys);
+    assert.match(outputs, /^should_run=true$/m);
+    assert.match(outputs, /^matrix=\{"include":\[/m);
+    assert.doesNotMatch(outputs, /\r|%0A|::/);
+    assert.equal(fs.readdirSync(directory).some(name => name.endsWith('.tmp')), false);
+    const bad = spawnSync(process.execPath, [script, '--event-name=workflow_dispatch', '--locations=Katowice%0Aowned=true'], { encoding: 'utf8' });
+    assert.equal(bad.status, 1);
+    assert.doesNotMatch(`${bad.stdout}${bad.stderr}`, /owned=true/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('enabled scheduled runs require stage four even below the full matrix', () => {
+  const { buildWorkflowPlan } = require('../src/qeeq/workflowPlan');
+  const input = {
+    eventName: 'schedule', timeZone: 'Europe/Warsaw', locations: ['Katowice'], rollingDays: 10,
+    durationsDays: [2], fullEnabled: true, benchmarkStage: 3, p50ScenarioSeconds: 2,
+    p95ScenarioSeconds: 4, maxParallel: 2, targetChunkMinutes: 10, maxBrowserMinutes: 20,
+    now: new Date('2026-08-20T10:00:00+02:00')
+  };
+  assert.throws(() => buildWorkflowPlan(input), /QEEQ_BENCHMARK_STAGE=4/);
+});
+
+test('workflow planner rejects duplicate catalog aliases and non-calendar partition dates', () => {
+  const { buildWorkflowPlan, partitionDates } = require('../src/qeeq/workflowPlan');
+  assert.throws(() => buildWorkflowPlan({
+    eventName: 'workflow_dispatch', timeZone: 'Europe/Warsaw', locations: ['Katowice', 'katowice'],
+    rollingDays: 1, durationsDays: [2], now: new Date('2026-08-20T10:00:00+02:00')
+  }), /locations must not contain duplicates/);
+  assert.throws(() => partitionDates(['2026-02-31'], 1), /valid consecutive YYYY-MM-DD/);
+  assert.throws(() => partitionDates(['2026-08-22', '2026-08-21'], 1), /valid consecutive YYYY-MM-DD/);
+});
+
+test('daily final status maps every infrastructure job failure to code one', () => {
+  const fs = require('node:fs');
+  const yaml = fs.readFileSync('.github/workflows/qeeq-daily.yml', 'utf8');
+  const finalStatus = yaml.slice(yaml.indexOf('  final-status:'));
+  for (const result of ['PLAN_RESULT', 'SCRAPE_RESULT', 'MERGE_RESULT', 'PAGES_RESULT', 'NOTIFY_RESULT']) {
+    assert.match(finalStatus, new RegExp(`${result}:`));
+  }
+  assert.match(finalStatus, /failure\|cancelled/);
+  assert.match(finalStatus, /0\|1\|2\) exit "\$MERGED_CODE"/);
+});

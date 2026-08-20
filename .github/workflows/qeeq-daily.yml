@@ -1,0 +1,375 @@
+name: QEEQ gated daily
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      locations:
+        description: Comma-separated catalog cities
+        required: true
+        default: Katowice
+        type: string
+      rolling_days:
+        description: Consecutive pickup dates starting tomorrow in Europe/Warsaw
+        required: true
+        default: "1"
+        type: string
+      durations_days:
+        description: Comma-separated rental durations
+        required: true
+        default: "2"
+        type: string
+      max_parallel:
+        description: Safe manual value; expanded runs use measured repository variables
+        required: true
+        default: "1"
+        type: string
+      acknowledge_expanded_run:
+        description: Required when a manual request exceeds nine scenarios
+        required: true
+        default: false
+        type: boolean
+      plan_only:
+        description: Calculate and upload a plan without running scrape jobs
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+env:
+  TZ: Europe/Warsaw
+  SCHEDULE_LOCATIONS: "Warszawa,Krakow,Gdansk,Katowice,Wroclaw,Poznan,Bydgoszcz,Lodz"
+  SCHEDULE_ROLLING_DAYS: "60"
+  SCHEDULE_DURATIONS: "2,3,4,5,6,7,8,9,10,11,12,13,14"
+  MAX_MATRIX_ENTRIES: "256"
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.plan.outputs.should_run }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      max_parallel: ${{ steps.plan.outputs.max_parallel }}
+      chunk_timeout_minutes: ${{ steps.plan.outputs.chunk_timeout_minutes }}
+      plan_only: ${{ steps.plan.outputs.plan_only }}
+      scenario_count: ${{ steps.plan.outputs.scenario_count }}
+      budget_ok: ${{ steps.plan.outputs.budget_ok }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      - name: Build validated workflow plan
+        id: plan
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_LOCATIONS: ${{ inputs.locations }}
+          MANUAL_ROLLING_DAYS: ${{ inputs.rolling_days }}
+          MANUAL_DURATIONS: ${{ inputs.durations_days }}
+          MANUAL_MAX_PARALLEL: ${{ inputs.max_parallel }}
+          ACKNOWLEDGE_EXPANDED_RUN: ${{ inputs.acknowledge_expanded_run }}
+          PLAN_ONLY: ${{ inputs.plan_only }}
+          QEEQ_FULL_SCHEDULE_ENABLED: ${{ vars.QEEQ_FULL_SCHEDULE_ENABLED }}
+          QEEQ_BENCHMARK_STAGE: ${{ vars.QEEQ_BENCHMARK_STAGE }}
+          QEEQ_P50_SCENARIO_SECONDS: ${{ vars.QEEQ_P50_SCENARIO_SECONDS }}
+          QEEQ_P95_SCENARIO_SECONDS: ${{ vars.QEEQ_P95_SCENARIO_SECONDS }}
+          QEEQ_MAX_PARALLEL: ${{ vars.QEEQ_MAX_PARALLEL }}
+          QEEQ_TARGET_CHUNK_MINUTES: ${{ vars.QEEQ_TARGET_CHUNK_MINUTES }}
+          QEEQ_MAX_BROWSER_MINUTES: ${{ vars.QEEQ_MAX_BROWSER_MINUTES }}
+        run: |
+          locations="${MANUAL_LOCATIONS:-Katowice}"
+          rolling_days="${MANUAL_ROLLING_DAYS:-1}"
+          durations="${MANUAL_DURATIONS:-2}"
+          manual_parallel="${MANUAL_MAX_PARALLEL:-1}"
+          acknowledge="${ACKNOWLEDGE_EXPANDED_RUN:-false}"
+          plan_only="${PLAN_ONLY:-false}"
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            locations="$SCHEDULE_LOCATIONS"
+            rolling_days="$SCHEDULE_ROLLING_DAYS"
+            durations="$SCHEDULE_DURATIONS"
+            manual_parallel="1"
+            acknowledge="false"
+            plan_only="false"
+          fi
+          npm run qeeq:plan -- \
+            --event-name="$EVENT_NAME" \
+            --time-zone="Europe/Warsaw" \
+            --locations="$locations" \
+            --rolling-days="$rolling_days" \
+            --durations-days="$durations" \
+            --manual-max-parallel="$manual_parallel" \
+            --acknowledge-expanded-run="$acknowledge" \
+            --plan-only="$plan_only" \
+            --full-enabled="${QEEQ_FULL_SCHEDULE_ENABLED:-false}" \
+            --benchmark-stage="${QEEQ_BENCHMARK_STAGE:-}" \
+            --p50-scenario-seconds="${QEEQ_P50_SCENARIO_SECONDS:-}" \
+            --p95-scenario-seconds="${QEEQ_P95_SCENARIO_SECONDS:-}" \
+            --max-parallel="${QEEQ_MAX_PARALLEL:-}" \
+            --target-chunk-minutes="${QEEQ_TARGET_CHUNK_MINUTES:-}" \
+            --max-browser-minutes="${QEEQ_MAX_BROWSER_MINUTES:-}" \
+            --output=workflow-plan.json \
+            --expected-keys-output=expected-scenario-keys.json \
+            --github-output="$GITHUB_OUTPUT"
+      - name: Upload plan diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qeeq-plan-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            workflow-plan.json
+            expected-scenario-keys.json
+
+  notify-plan-failure:
+    if: ${{ always() && needs.plan.result == 'failure' }}
+    needs: plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      - name: Notify plan failure
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then exit 0; fi
+          message="$(node src/qeeq/telegramSummary.js --mode=plan-failure --error='Workflow planning failed' --run-url="$RUN_URL")"
+          curl --fail --silent --show-error \
+            --request POST \
+            --url "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${message}"
+
+  scrape:
+    if: ${{ needs.plan.result == 'success' && needs.plan.outputs.should_run == 'true' }}
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.plan.outputs.max_parallel) }}
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.chunk_timeout_minutes) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Scrape validated date chunk
+        id: scrape
+        shell: bash
+        env:
+          CHUNK_ID: ${{ matrix.chunk_id }}
+          START_DATES: ${{ matrix.start_dates }}
+          LOCATIONS: ${{ matrix.locations }}
+          DURATIONS_DAYS: ${{ matrix.durations_days }}
+        run: |
+          mkdir -p output artifacts/qeeq
+          set +e
+          node src/qeeq/run.js \
+            --config=qeeq.config.example.json \
+            --locations="$LOCATIONS" \
+            --start-dates="$START_DATES" \
+            --durations-days="$DURATIONS_DAYS" \
+            --full-schedule-enabled=true \
+            --save="output/qeeq-results-${CHUNK_ID}.json" \
+            > "output/${CHUNK_ID}.log" 2>&1
+          code=$?
+          set -e
+          echo "exit_code=${code}" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$code" > output/exit-code.txt
+          printf '{"chunk_id":"%s","exit_code":%s}\n' "$CHUNK_ID" "$code" > output/exit-envelope.txt
+      - name: Upload chunk diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qeeq-results-${{ matrix.chunk_id }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            output/qeeq-results-${{ matrix.chunk_id }}.json
+            output/${{ matrix.chunk_id }}.log
+            output/exit-code.txt
+            output/exit-envelope.txt
+            artifacts/qeeq/**/*screenshot*
+            artifacts/qeeq/**/*sanitized*
+            artifacts/qeeq/**/*dom*
+            artifacts/qeeq/**/*error*
+
+  merge:
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.should_run == 'true' }}
+    needs: [plan, scrape]
+    runs-on: ubuntu-latest
+    outputs:
+      report_ready: ${{ steps.merge.outputs.report_ready }}
+      merged_exit_code: ${{ steps.merge.outputs.exit_code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      - name: Download every available chunk
+        uses: actions/download-artifact@v4
+        with:
+          pattern: qeeq-results-*
+          path: downloaded-parts
+      - name: Download authoritative expected keys
+        uses: actions/download-artifact@v4
+        with:
+          name: qeeq-plan-${{ github.run_id }}
+          path: plan-input
+      - name: Merge and regenerate canonical outputs
+        id: merge
+        shell: bash
+        run: |
+          mkdir -p output
+          cp plan-input/expected-scenario-keys.json expected-scenario-keys.json
+          code=0
+          set +e
+          npm run qeeq:merge -- --expected-keys-file=expected-scenario-keys.json
+          code=$?
+          if [ "$code" -eq 0 ]; then npm run qeeq:report; code=$?; fi
+          if [ "$code" -eq 0 ]; then npm run qeeq:xlsx; code=$?; fi
+          if [ "$code" -eq 0 ]; then npm run qeeq:aux; code=$?; fi
+          if [ "$code" -eq 0 ]; then
+            node -e "const fs=require('node:fs');const {exitCodeForPayload}=require('./src/qeeq/run');process.exitCode=exitCodeForPayload(JSON.parse(fs.readFileSync('output/qeeq-results-latest.json','utf8')));"
+            code=$?
+          fi
+          set -e
+          printf '%s\n' "$code" > output/merged-exit-code.txt
+          echo "exit_code=${code}" >> "$GITHUB_OUTPUT"
+          if [ -s output/qeeq-results-latest.json ] && [ -s output/qeeq-results.csv ] && [ -s output/qeeq-report.html ] && [ -s output/qeeq-summary.xlsx ] && [ -s output/quality-summary.json ] && [ -s output/run-manifest.json ]; then
+            echo "report_ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "report_ready=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Upload merged reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qeeq-merged-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 30
+          path: |
+            output/qeeq-results-latest.json
+            output/qeeq-results.csv
+            output/qeeq-report.html
+            output/qeeq-summary.xlsx
+            output/quality-summary.json
+            output/run-manifest.json
+            output/merged-exit-code.txt
+
+  pages:
+    if: ${{ always() && needs.merge.result == 'success' && needs.merge.outputs.report_ready == 'true' && vars.QEEQ_PAGES_ENABLED == 'true' }}
+    needs: merge
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: qeeq-merged-${{ github.run_id }}
+          path: merged
+      - name: Stage public report files
+        shell: bash
+        run: |
+          mkdir -p pages-site
+          cp merged/qeeq-report.html pages-site/index.html
+          cp merged/qeeq-results-latest.json pages-site/qeeq-results-latest.json
+          cp merged/qeeq-results.csv pages-site/qeeq-results.csv
+          cp merged/qeeq-summary.xlsx pages-site/qeeq-summary.xlsx
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages-site
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  notify:
+    if: ${{ always() && needs.plan.outputs.should_run == 'true' }}
+    needs: [plan, scrape, merge, pages]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      - name: Download merged result when available
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: qeeq-merged-${{ github.run_id }}
+          path: merged
+      - name: Send final summary
+        shell: bash
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          REPORT_URL: ${{ needs.pages.outputs.page_url }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then exit 0; fi
+          if [ -s merged/qeeq-results-latest.json ]; then
+            summary_args=(--mode=final-summary --input=merged/qeeq-results-latest.json --artifact-url="$RUN_URL" --run-url="$RUN_URL")
+            if [ -n "$REPORT_URL" ]; then summary_args+=(--report-url="$REPORT_URL"); fi
+            message="$(node src/qeeq/telegramSummary.js "${summary_args[@]}")"
+          else
+            message="$(node src/qeeq/telegramSummary.js --mode=plan-failure --error='Scrape or merge failed before canonical output' --run-url="$RUN_URL")"
+          fi
+          curl --fail --silent --show-error \
+            --request POST \
+            --url "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${message}"
+
+  final-status:
+    if: ${{ always() }}
+    needs: [plan, scrape, merge, pages, notify]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Preserve validated status after diagnostics
+        shell: bash
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          SHOULD_RUN: ${{ needs.plan.outputs.should_run }}
+          SCRAPE_RESULT: ${{ needs.scrape.result }}
+          MERGE_RESULT: ${{ needs.merge.result }}
+          PAGES_RESULT: ${{ needs.pages.result }}
+          NOTIFY_RESULT: ${{ needs.notify.result }}
+          MERGED_CODE: ${{ needs.merge.outputs.merged_exit_code }}
+        run: |
+          if [ "$PLAN_RESULT" != "success" ]; then exit 1; fi
+          if [ "$SHOULD_RUN" != "true" ]; then exit 0; fi
+          if [ "$SCRAPE_RESULT" != "success" ]; then exit 1; fi
+          if [ "$MERGE_RESULT" != "success" ]; then exit 1; fi
+          case "$PAGES_RESULT" in failure|cancelled) exit 1 ;; esac
+          if [ "$NOTIFY_RESULT" != "success" ]; then exit 1; fi
+          case "$MERGED_CODE" in
+            0|1|2) exit "$MERGED_CODE" ;;
+            *) exit 1 ;;
+          esac
