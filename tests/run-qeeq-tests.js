@@ -2603,3 +2603,42 @@ test('autocomplete resolver waits for the current QEEQ pickup input to render', 
   assert.equal(matches.length, 1);
   assert.equal(matches[0].iata, 'KTW');
 });
+
+test('airport identity selection dismisses a cookie dialog that rendered after navigation', async () => {
+  const { SELECTORS, selectAndReadAirportIdentity } = require('../src/qeeq/scraper');
+  let popupVisible = true;
+  let selected = false;
+  const page = {
+    getByText(label) {
+      if (label !== 'Odrzuć nieobowiązkowe pliki cookie') {
+        return { count: async () => 0, nth() { return this; } };
+      }
+      return {
+        count: async () => 1,
+        nth() { return this; },
+        isVisible: async () => popupVisible,
+        click: async () => { popupVisible = false; }
+      };
+    },
+    locator(selector) {
+      assert.equal(selector, SELECTORS.pickPlace);
+      return {
+        count: async () => 1,
+        nth: () => ({ inputValue: async () => 'pickup_city=2477&pickup_landmark=404260&data_type=airport' })
+      };
+    }
+  };
+  const suggestion = {
+    label: 'Port Lotniczy Katowice-Pyrzowice',
+    iata: 'KTW',
+    locator: {
+      click: async () => {
+        if (popupVisible) throw new Error('cookie dialog intercepted click');
+        selected = true;
+      }
+    }
+  };
+  const identity = await selectAndReadAirportIdentity(page, suggestion);
+  assert.equal(selected, true);
+  assert.equal(identity.landmark, '404260');
+});

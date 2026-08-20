@@ -108,6 +108,7 @@ async function readSuggestion(locator) {
 }
 
 async function selectAndReadAirportIdentity(page, suggestion) {
+  await dismissPolishPopups(page);
   await suggestion.locator.click();
   const places = page.locator(SELECTORS.pickPlace);
   const value = await places.count() > 0 ? await places.nth(0).inputValue() : '';
