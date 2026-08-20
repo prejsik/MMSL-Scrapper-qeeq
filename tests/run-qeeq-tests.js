@@ -2043,3 +2043,18 @@ test('XLSX atomic failures preserve the primary error while still attempting tem
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('XLSX preserves distinct root diagnostic counts after presentation redaction', async () => {
+  const { buildWorkbook } = require('../src/qeeq/reportXlsx');
+  const workbook = await buildWorkbook({
+    quality: { quality_errors: ['ticket:ROOT-A', 'ticket:ROOT-B'] },
+    scenarios: [{ key: 'ktw', quality_errors: ['safe_scenario_code'], offers: [] }]
+  });
+  const rows = workbook.getWorksheet('Data quality').getSheetValues().slice(2);
+  const ticketRows = rows.filter(row => row[2] === 'ticket=[redacted]');
+  assert.equal(ticketRows.length, 1);
+  assert.equal(ticketRows[0][3], 2);
+  assert.equal(rows.some(row => row[2] === 'safe_scenario_code' && row[3] === 1), true);
+  const values = rows.flat(2).filter(value => value !== null && value !== undefined).join('|');
+  assert.doesNotMatch(values, /ROOT-A|ROOT-B/);
+});

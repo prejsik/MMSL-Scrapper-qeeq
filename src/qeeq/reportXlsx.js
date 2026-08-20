@@ -233,10 +233,11 @@ function diagnosticRows(payload) {
     const code = safeText(codeValue);
     if (!code) return;
     const key = safeScenarioKey(scenarioValue);
-    if (!diagnostics.has(code)) diagnostics.set(code, { severity, occurrences: new Set(), scenarios: new Set() });
+    if (!diagnostics.has(code)) diagnostics.set(code, { severity, occurrences: new Set(), scenarios: new Set(), rawCodes: new Set() });
     const entry = diagnostics.get(code);
     if (severity === 'Error') entry.severity = 'Error';
     entry.occurrences.add(key ? `${severity}:${rawCode}:${key}` : token);
+    entry.rawCodes.add(rawCode);
     if (key) entry.scenarios.add(key);
   };
   for (const scenario of scenarioObjects(root)) {
@@ -247,7 +248,8 @@ function diagnosticRows(payload) {
   arrayOf(root.errors).filter(isPlainObject).forEach((error, index) => add('Error', error.code, error.scenario_key, `root-error:${safeScenarioKey(error.scenario_key)}:${safeText(error.code)}:${index}`));
   arrayOf(isPlainObject(root.quality) ? root.quality.quality_errors : null).forEach((code, index) => {
     const safeCode = safeText(code);
-    if (!diagnostics.has(safeCode)) add('Warning', code, null, `root-quality:${safeCode}:${index}`);
+    const rawCode = typeof code === 'string' ? code : '';
+    if (!diagnostics.get(safeCode)?.rawCodes.has(rawCode)) add('Warning', code, null, `root-quality:${safeCode}:${index}`);
   });
   return [...diagnostics.entries()].sort((a, b) => compareText(a[0], b[0])).map(([code, entry]) => ({
     Severity: entry.severity,
