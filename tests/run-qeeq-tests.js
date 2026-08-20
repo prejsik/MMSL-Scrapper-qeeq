@@ -2968,3 +2968,11 @@ test('provider observer ignores a supported response received after its absolute
   assert.equal(result.payloads.length, 1);
   assert.equal(detached, true);
 });
+
+test('README documents safety gate outputs and verification commands', () => {
+  const fs = require('node:fs');
+  const readme = fs.readFileSync('README.md', 'utf8');
+  for (const required of ['QEEQ_FULL_SCHEDULE_ENABLED', 'QEEQ_BENCHMARK_STAGE', 'QEEQ_P95_SCENARIO_SECONDS', 'QEEQ_MAX_BROWSER_MINUTES', 'QEEQ_PAGES_ENABLED', '7020', 'npm.cmd test', 'qeeq-location-validation.json', 'qeeq-results.csv', 'qeeq-report.html', 'qeeq-summary.xlsx', 'quality-summary.json', 'run-manifest.json', 'newcomer_coupon', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID']) {
+    assert.match(readme, new RegExp(required.replace('.', '\\.')));
+  }
+});
