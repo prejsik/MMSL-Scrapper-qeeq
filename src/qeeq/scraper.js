@@ -2,7 +2,10 @@ const { normalizePriceCandidate, parseMoney, rankVerifiedPublicOffers } = requir
 
 function buildOfferBusinessKey(id, bid) {
   if (id === null || id === undefined || bid === null || bid === undefined) return null;
-  return JSON.stringify([String(id), String(bid)]);
+  const normalizedId = String(id).trim();
+  const normalizedBid = String(bid).trim();
+  if (!normalizedId || !normalizedBid) return null;
+  return JSON.stringify([normalizedId, normalizedBid]);
 }
 
 function canonicalProviderName(name) {
@@ -31,20 +34,28 @@ function parseObservedListPayload(payload) {
       const key = buildOfferBusinessKey(meal?.id, meal?.bid);
       if (key === null) continue;
       const matchingShops = shopsById.get(String(meal.pickup_shop)) || [];
-      for (const shop of matchingShops) {
-        const providerName = canonicalProviderName(shop.name);
-        if (providerName === null) continue;
-        const candidates = providerMetadata.get(key) || [];
-        candidates.push({
+      const namedShops = matchingShops
+        .map(shop => ({ shop, providerName: canonicalProviderName(shop.name) }))
+        .filter(match => match.providerName !== null);
+      let candidate;
+      if (namedShops.length === 0) {
+        candidate = { quality_error: 'provider_unresolved' };
+      } else if (namedShops.length !== 1) {
+        candidate = { quality_error: 'provider_ambiguous' };
+      } else {
+        const { shop, providerName } = namedShops[0];
+        candidate = {
           providerName,
           providerScore: shop.score !== null && shop.score !== undefined && Number.isFinite(Number(shop.score)) ? Number(shop.score) : null,
           pickupShopId: meal.pickup_shop,
           bestPriceInfo: meal.best_price_info ?? null,
           diamondPriceInfo: meal.diamond_price_info ?? null,
           originPriceInfo: meal.origin_price_info ?? null
-        });
-        providerMetadata.set(key, candidates);
+        };
       }
+      const candidates = providerMetadata.get(key) || [];
+      candidates.push(candidate);
+      providerMetadata.set(key, candidates);
     }
   }
 
@@ -59,6 +70,7 @@ function resolveProviderForOffer(snapshot, providerMetadata) {
   if (candidates.length === 0) return { quality_error: 'provider_unresolved' };
   if (candidates.length !== 1) return { quality_error: 'provider_ambiguous' };
   const candidate = candidates[0];
+  if (candidate?.quality_error) return { quality_error: candidate.quality_error };
   const providerName = canonicalProviderName(candidate?.providerName);
   if (providerName === null) return { quality_error: 'provider_unresolved' };
   return { ...candidate, providerName };

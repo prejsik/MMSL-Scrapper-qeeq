@@ -437,3 +437,74 @@ test('malformed parser inputs remain unresolved without throwing', () => {
   assert.equal(noContext.price_verified, false);
   assert.doesNotThrow(() => parseOfferSnapshot(null, null, null));
 });
+
+test('blank business-key components stay unresolved end to end', () => {
+  const fixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const { buildOfferBusinessKey, parseOfferSnapshot } = require('../src/qeeq/scraper');
+  const context = { rentalDays: 2, vehicle: fixture.vehicle };
+  const publicSnapshot = { ...fixture.offer, displayedAmount: '119 zł', discountType: null, diamondAmount: null };
+  const snapshots = [
+    { ...publicSnapshot, businessId: '' },
+    { ...publicSnapshot, businessId: '   ' },
+    { ...publicSnapshot, businessBid: '' },
+    { ...publicSnapshot, businessBid: ' \t ' }
+  ];
+
+  for (const snapshot of snapshots) {
+    const key = buildOfferBusinessKey(snapshot.businessId, snapshot.businessBid);
+    const providers = new Map([[key, [{ providerName: 'SHOULD NOT RESOLVE' }]]]);
+    const record = parseOfferSnapshot(snapshot, context, providers);
+    assert.equal(key, null);
+    assert.equal(record.record_type, 'group');
+    assert.equal(record.provider_name, undefined);
+    assert.equal(record.total_price, undefined);
+    assert.equal(record.price_verified, false);
+    assert.deepEqual(record.quality_errors, ['provider_unresolved']);
+  }
+});
+
+test('duplicate exact-pair meals remain ambiguous when one shop is unmatched', () => {
+  const fixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { buildOfferBusinessKey, parseObservedListPayload, parseOfferSnapshot } = require('../src/qeeq/scraper');
+  const meal = apiFixture.data.list[0].meal_list[0];
+  const providers = parseObservedListPayload({
+    data: {
+      list: [{ meal_list: [meal, { ...meal, pickup_shop: 'unmatched-shop' }] }],
+      shops: apiFixture.data.shops
+    }
+  });
+  const key = buildOfferBusinessKey(fixture.offer.businessId, fixture.offer.businessBid);
+  assert.equal(providers.get(key).length, 2);
+  const publicSnapshot = { ...fixture.offer, displayedAmount: '119 zł', discountType: null, diamondAmount: null };
+  const record = parseOfferSnapshot(publicSnapshot, { rentalDays: 2, vehicle: fixture.vehicle }, providers);
+
+  assert.equal(record.record_type, 'group');
+  assert.equal(record.provider_name, undefined);
+  assert.equal(record.total_price, undefined);
+  assert.equal(record.price_verified, false);
+  assert.deepEqual(record.quality_errors, ['provider_ambiguous']);
+});
+
+test('duplicate exact-pair meals remain ambiguous when one shop name is blank', () => {
+  const fixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { buildOfferBusinessKey, parseObservedListPayload, parseOfferSnapshot } = require('../src/qeeq/scraper');
+  const meal = apiFixture.data.list[0].meal_list[0];
+  const providers = parseObservedListPayload({
+    data: {
+      list: [{ meal_list: [meal, { ...meal, pickup_shop: 'blank-shop' }] }],
+      shops: [...apiFixture.data.shops, { id: 'blank-shop', name: '   ', score: 9.9 }]
+    }
+  });
+  const key = buildOfferBusinessKey(fixture.offer.businessId, fixture.offer.businessBid);
+  assert.equal(providers.get(key).length, 2);
+  const publicSnapshot = { ...fixture.offer, displayedAmount: '119 zł', discountType: null, diamondAmount: null };
+  const record = parseOfferSnapshot(publicSnapshot, { rentalDays: 2, vehicle: fixture.vehicle }, providers);
+
+  assert.equal(record.record_type, 'group');
+  assert.equal(record.provider_name, undefined);
+  assert.equal(record.total_price, undefined);
+  assert.equal(record.price_verified, false);
+  assert.deepEqual(record.quality_errors, ['provider_ambiguous']);
+});
