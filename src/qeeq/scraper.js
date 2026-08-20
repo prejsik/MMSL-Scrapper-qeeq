@@ -46,6 +46,25 @@ function normalizeText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+function parseAutocompleteIdentity(input = {}) {
+  const title = normalizeText(input.title);
+  const text = normalizeText(input.text);
+  const parts = value => {
+    const match = /^(.*?)\s*\(\s*([A-Z]{3})\s*\)(?:\s*,.*)?$/.exec(value);
+    return match ? { label: normalizeText(match[1]), iata: match[2] } : null;
+  };
+  const titleParts = parts(title);
+  const textParts = parts(text);
+  const params = new URLSearchParams(typeof input.value === 'string' ? input.value : '');
+  return {
+    label: titleParts?.label || title || textParts?.label || text,
+    iata: titleParts?.iata || textParts?.iata || '',
+    city: params.get('pickup_city'),
+    landmark: params.get('pickup_landmark'),
+    dataType: params.get('data_type')
+  };
+}
+
 function controlledError(code) {
   const error = new Error(code);
   error.code = code;
@@ -76,15 +95,34 @@ async function readSuggestion(locator) {
   for (const name of ['data-iata', 'iata', 'data-city', 'city', 'data-landmark', 'landmark', 'data-type', 'type', 'data-data-type', 'title']) {
     attributes[name] = await locator.getAttribute(name);
   }
-  const iataFromText = /(?:^|[\s(])([A-Z]{3})(?:[\s)]|$)/.exec(text)?.[1] || null;
+  const parsed = parseAutocompleteIdentity({ title: attributes.title, text });
   return {
     locator,
-    label: normalizeText(attributes.title || text.replace(/\s*\([A-Z]{3}\)\s*$/, '')),
-    iata: normalizeText(attributes['data-iata'] || attributes.iata || iataFromText).toUpperCase(),
-    city: attributes['data-city'] ?? attributes.city,
-    landmark: attributes['data-landmark'] ?? attributes.landmark,
-    dataType: attributes['data-data-type'] ?? attributes['data-type'],
+    label: parsed.label,
+    iata: normalizeText(attributes['data-iata'] || attributes.iata || parsed.iata).toUpperCase(),
+    city: attributes['data-city'] ?? attributes.city ?? parsed.city,
+    landmark: attributes['data-landmark'] ?? attributes.landmark ?? parsed.landmark,
+    dataType: attributes['data-data-type'] ?? attributes['data-type'] ?? parsed.dataType,
     type: attributes.type
+  };
+}
+
+async function selectAndReadAirportIdentity(page, suggestion) {
+  await suggestion.locator.click();
+  const places = page.locator(SELECTORS.pickPlace);
+  const value = await places.count() > 0 ? await places.nth(0).inputValue() : '';
+  const parsed = parseAutocompleteIdentity({
+    title: suggestion.label,
+    text: `${suggestion.label} (${suggestion.iata})`,
+    value
+  });
+  return {
+    ...suggestion,
+    label: suggestion.label || parsed.label,
+    iata: suggestion.iata || parsed.iata,
+    city: parsed.city ?? suggestion.city,
+    landmark: parsed.landmark ?? suggestion.landmark,
+    dataType: parsed.dataType ?? suggestion.dataType
   };
 }
 
@@ -734,6 +772,7 @@ module.exports = {
   closeBrowserResources,
   dismissPolishPopups,
   parseObservedListPayload,
+  parseAutocompleteIdentity,
   resolveProviderForOffer,
   parseGroupSnapshot,
   parseOfferSnapshot,
@@ -741,5 +780,6 @@ module.exports = {
   shouldRetryScenario,
   snapshotOfferSubtree,
   resolveVisibleAirportMatches,
+  selectAndReadAirportIdentity,
   visibleAirportSuggestions
 };

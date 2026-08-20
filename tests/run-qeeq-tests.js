@@ -2534,3 +2534,18 @@ test('workflow planner enforces GitHub timeout and parallelism boundaries withou
   assert.throws(() => buildWorkflowPlan({ ...base, planOnly: true, p95ScenarioSeconds: 1401 }), /chunk timeout.*360/i);
   assert.throws(() => buildWorkflowPlan({ ...base, planOnly: true, maxParallel: 257 }), /maxParallel.*at most 256/);
 });
+
+test('current QEEQ autocomplete title and selected hidden value yield canonical airport identity', () => {
+  const { parseAutocompleteIdentity } = require('../src/qeeq/scraper');
+  assert.deepEqual(parseAutocompleteIdentity({
+    title: 'Port Lotniczy Katowice-Pyrzowice(KTW), Katowice, Województwo śląskie, Polska',
+    text: '',
+    value: 'pickup_city=2477&pickup_landmark=404260&data_type=airport'
+  }), {
+    label: 'Port Lotniczy Katowice-Pyrzowice',
+    iata: 'KTW',
+    city: '2477',
+    landmark: '404260',
+    dataType: 'airport'
+  });
+});

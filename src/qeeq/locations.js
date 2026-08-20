@@ -31,7 +31,7 @@ function compareLiveAirport(catalogAirport, liveAirport) {
   if (normalizeLocationKey(liveAirport.label) !== normalizeLocationKey(catalogAirport.label)) {
     return { useLiveIds: false, error: { code: 'location_label_mismatch', expected: catalogAirport.label, actual: liveAirport.label } };
   }
-  if (String(liveAirport.type) !== String(catalogAirport.type)) {
+  if (liveAirport.type !== null && liveAirport.type !== undefined && String(liveAirport.type) !== String(catalogAirport.type)) {
     return { useLiveIds: false, error: { code: 'location_type_mismatch', expected: catalogAirport.type, actual: liveAirport.type } };
   }
   if (normalizeLocationKey(liveAirport.dataType) !== normalizeLocationKey(catalogAirport.dataType)) {
