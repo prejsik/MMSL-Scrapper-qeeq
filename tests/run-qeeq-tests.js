@@ -968,3 +968,25 @@ test('search uses only visible pickup date time and submit controls when hidden 
   assert.equal(interactiveActions.filter(action => action[1] === 'submit').length, 1);
   assert.equal(interactiveActions.every(action => action[3] === 1), true);
 });
+
+test('clear-only autocomplete change cannot establish post-query freshness', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const { validateLiveLocationCatalog } = require('../src/qeeq/validateLocations');
+
+  const scraperFake = createFakeQeeqBrowser({ restoredExactWithoutRefresh: true });
+  const outcome = await new QeeqScraper(task5Config({ resultsTimeoutMs: 200 }), {
+    launchBrowser: scraperFake.launchBrowser, now: scraperFake.now, sleep: scraperFake.sleep
+  }).runScenario(task5Scenario());
+  assert.equal(outcome.error_code, 'location_match_missing');
+  assert.equal(scraperFake.selectedSuggestionIata, null);
+
+  const validatorFake = createFakeQeeqBrowser({ restoredExactWithoutRefresh: true });
+  const validation = await validateLiveLocationCatalog(task5Config({ resultsTimeoutMs: 200 }), {
+    launchBrowser: validatorFake.launchBrowser, now: validatorFake.now, sleep: validatorFake.sleep
+  });
+  assert.equal(validation.validation_status, 'fail');
+  assert.equal(validation.airports.find(item => item.iata === 'KTW').error_code, 'location_match_missing');
+  assert.equal(validatorFake.selectedSuggestionIata, null);
+  assert.equal(validatorFake.submitted, false);
+});

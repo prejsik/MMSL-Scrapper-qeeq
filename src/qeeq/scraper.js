@@ -124,14 +124,14 @@ async function resolveVisibleAirportMatches(page, airport, options = {}) {
   const sleep = options.sleep || (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)));
   const pollMs = 100;
   const maximumPolls = Math.max(1, Math.ceil(timeoutMs / pollMs));
-  const beforeFingerprint = airportSuggestionFingerprint(await visibleAirportSuggestions(page));
   await pickupInput.fill('');
-  let refreshObserved = airportSuggestionFingerprint(await visibleAirportSuggestions(page)) !== beforeFingerprint;
   await pickupInput.fill(airport.label || airport.iata);
+  const postQueryFingerprint = airportSuggestionFingerprint(await visibleAirportSuggestions(page));
+  let refreshObserved = false;
   let matches = [];
   for (let poll = 0; poll <= maximumPolls; poll += 1) {
     const suggestions = await visibleAirportSuggestions(page);
-    refreshObserved ||= airportSuggestionFingerprint(suggestions) !== beforeFingerprint;
+    refreshObserved ||= airportSuggestionFingerprint(suggestions) !== postQueryFingerprint;
     matches = matchingAirportSuggestions(suggestions, airport);
     if ((refreshObserved && matches.length > 0) || poll === maximumPolls) break;
     await sleep(Math.min(pollMs, timeoutMs));

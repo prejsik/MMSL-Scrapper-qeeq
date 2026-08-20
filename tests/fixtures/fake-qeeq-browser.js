@@ -95,7 +95,10 @@ function createFakeQeeqBrowser(options = {}) {
       const terminalLoadMoreStall = state.loadMoreClicks >= state.loadMoreCounts.length - 1
         && state.loadMoreCounts.length > 1
         && state.loadMoreCounts.at(-1) === state.loadMoreCounts.at(-2);
-      if (this.kind === 'suggestions') return this.page.suggestions().length;
+      if (this.kind === 'suggestions') {
+        this.data.snapshot ||= this.page.suggestions();
+        return this.data.snapshot.length;
+      }
       if (this.kind === 'popup') return this.page.popups[this.data.label] ? (state.hiddenFirstControls ? 2 : 1) : 0;
       if (['pickupInput', 'dateOrTime', 'submit'].includes(this.kind)) return state.hiddenFirstControls ? 2 : 1;
       if (this.kind === 'loadMore') return !state.loadMoreDisappeared && (state.pendingGroupCount !== null || state.loadMoreClicks < state.loadMoreCounts.length - 1 || terminalLoadMoreStall) ? 1 : 0;
@@ -127,7 +130,8 @@ function createFakeQeeqBrowser(options = {}) {
 
     nth(index) {
       if (this.kind === 'suggestions') {
-        return new FakeLocator(this.page, 'suggestion', this.page.suggestions()[index]);
+        this.data.snapshot ||= this.page.suggestions();
+        return new FakeLocator(this.page, 'suggestion', this.data.snapshot[index]);
       }
       if (this.kind === 'groups') return new FakeLocator(this.page, 'group', { index });
       return new FakeLocator(this.page, this.kind, { ...this.data, index });
@@ -155,7 +159,11 @@ function createFakeQeeqBrowser(options = {}) {
       state.actions.push(['fill', this.kind, value, this.data.index ?? 0]);
       if (this.kind === 'pickupInput') {
         this.page.pickupQuery = value;
-        this.page.autocompletePollsRemaining = options.autocompleteDelayPolls || 0;
+        this.page.autocompletePollsRemaining = options.autocompleteDelayPolls ?? 0;
+        this.page.autocompleteSnapshotPending = Boolean(value)
+          && options.autocompleteDelayPolls === undefined
+          && !options.staleExactSuggestion
+          && !options.restoredExactWithoutRefresh;
       }
       if (this.kind === 'dateOrTime') {
         const hiddenName = this.data.hiddenName;
@@ -263,6 +271,7 @@ function createFakeQeeqBrowser(options = {}) {
       this.expansionPollsRemaining = 0;
       this.pickupQuery = null;
       this.autocompletePollsRemaining = 0;
+      this.autocompleteSnapshotPending = false;
       this.popups = {
         'Odrzuć nieobowiązkowe pliki cookie': true,
         OK: true
@@ -272,12 +281,18 @@ function createFakeQeeqBrowser(options = {}) {
 
     suggestions() {
       const stale = { visible: false, iata: 'WRO', label: 'Lotnisko we Wrocławiu' };
+      const exactKtw = airportFixture.find(item => item.iata === 'KTW');
       if (options.staleExactSuggestion) {
-        const exact = airportFixture.find(item => item.iata === 'KTW');
-        return [stale, { ...exact, visible: true }];
+        return [stale, { ...exactKtw, visible: true }];
+      }
+      if (options.restoredExactWithoutRefresh && this.pickupQuery === null) return [stale, { ...exactKtw, visible: true }];
+      if (options.restoredExactWithoutRefresh && this.pickupQuery) return [stale, { ...exactKtw, visible: true }];
+      if (!this.pickupQuery) return [stale];
+      if (this.autocompleteSnapshotPending) {
+        this.autocompleteSnapshotPending = false;
+        return [stale];
       }
       if (this.autocompletePollsRemaining > 0) return [stale];
-      if (!this.pickupQuery) return [stale];
       const queryIata = String(this.pickupQuery || '').trim().toUpperCase();
       const normalizedQuery = String(this.pickupQuery || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
       const fixtureMatch = airportFixture.find(item => item.iata === queryIata)
