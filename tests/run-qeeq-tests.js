@@ -532,3 +532,170 @@ test('padded DOM business components do not match an unpadded API pair', () => {
     assert.deepEqual(record.quality_errors, ['provider_unresolved']);
   }
 });
+
+test('browser flow selects visible IATA match and stops stalled load-more', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { expandScenarios } = require('../src/qeeq/run');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser();
+  const scraperConfig = {
+    baseUrl: 'https://www.qeeq.pl',
+    timeZone: 'Europe/Warsaw', locations: ['Katowice'], startDates: ['2026-09-19'], rollingDays: 1,
+    durationsDays: [2], pickupTime: '10:00', dropoffTime: '10:00', maxScenarios: 7020,
+    driverAge: '30-60',
+    residenceCountryCode: 'PL',
+    maxLoadMoreIterations: 20,
+    maxVehicleGroupsPerScenario: 300,
+    maxOffersPerScenario: 1500,
+    artifactsDir: 'artifacts/qeeq-test'
+  };
+  const [scenario] = expandScenarios(scraperConfig, new Date('2026-08-20T10:00:00+02:00'));
+  assert.equal(scenario.rentalDays, 2);
+  const scraper = new QeeqScraper(scraperConfig, { launchBrowser: fake.launchBrowser, sleep: async () => {} });
+  const outcome = await scraper.runScenario(scenario);
+  assert.equal(fake.selectedSuggestionIata, 'KTW');
+  assert.deepEqual(fake.hiddenSearchValues, {
+    from_date_0: '2026-09-19', from_date_1: '10:00',
+    to_date_0: '2026-09-21', to_date_1: '10:00'
+  });
+  assert.equal(fake.driverAge, '30-60');
+  assert.equal(fake.residenceCountryCode, 'PL');
+  assert.equal(fake.loadMoreClicks, 2);
+  assert.equal(outcome.offers[0].provider_name, 'CARWIZ');
+  assert.equal(outcome.quality_errors.includes('load_more_stalled'), true);
+  assert.equal(fake.responseListenerAttachedBeforeSubmit, true);
+  assert.match(fake.observedRequestUrls[0], /\/car-api\/search\/list/);
+  assert.deepEqual(fake.popupClicks, { optionalCookies: 1, lowerBanner: 1 });
+  assert.equal(outcome.source_search_url, 'https://www.qeeq.pl/car/search');
+});
+
+test('retry is bounded to one fresh session for transient failures', () => {
+  const { shouldRetryScenario } = require('../src/qeeq/scraper');
+  assert.equal(shouldRetryScenario({ error_code: 'session_expired', attempt: 0 }), true);
+  assert.equal(shouldRetryScenario({ error_code: 'navigation_timeout', attempt: 1 }), false);
+  assert.equal(shouldRetryScenario({ error_code: 'price_unverified', attempt: 0 }), false);
+});
+
+test('offer fields are read only from the expanded provider subtree', () => {
+  const { snapshotOfferSubtree } = require('../src/qeeq/scraper');
+  const snapshot = snapshotOfferSubtree({
+    supplierInfoText: 'CARWIZ 8.5 (120)',
+    featureTexts: ['Automatyczna', 'Depozyt: 3 399,99 zł', '5 miejsc', '5 drzwi', '1 bagaż'],
+    priceText: '106 zł', periodText: 'łącznie za 2 dni',
+    outsideSidebarText: 'Kaucja poniżej 3 000 zł Ocena 8+'
+  });
+  assert.equal(snapshot.ratingText, '8.5');
+  assert.equal(snapshot.ratingCountText, '120');
+  assert.equal(snapshot.depositText, 'Depozyt: 3 399,99 zł');
+  assert.equal(snapshot.transmission, 'Automatyczna');
+  assert.equal(snapshot.seats, 5);
+  assert.equal(snapshot.doors, 5);
+  assert.equal(snapshot.luggage, 1);
+  assert.doesNotMatch(JSON.stringify(snapshot), /poniżej|Ocena 8\+/);
+});
+
+test('age and residence use visible-label fallbacks when primary selectors are absent', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({ primaryProfileControls: false });
+  const scraper = new QeeqScraper({ baseUrl: 'https://www.qeeq.pl', driverAge: '30-60', residenceCountryCode: 'PL' }, { launchBrowser: fake.launchBrowser, sleep: async () => {} });
+  await scraper.runScenario({ key: 'ktw|2026-09-19|2', airport: { iata: 'KTW' }, pickupDate: '2026-09-19', pickupTime: '10:00', dropoffDate: '2026-09-21', dropoffTime: '10:00', rentalDays: 2 });
+  assert.deepEqual(fake.semanticLabelsUsed, ['Wiek kierowcy', 'Kraj zamieszkania']);
+});
+
+test('live catalog validator requires nine unique visible autocomplete matches', async () => {
+  const fixture = require('./fixtures/qeeq-airport-autocomplete.json');
+  const { validateLiveLocationCatalog } = require('../src/qeeq/validateLocations');
+  const result = await validateLiveLocationCatalog({ baseUrl: 'https://www.qeeq.pl' }, { resolveAirport: async airport => fixture.find(item => item.iata === airport.iata), now: () => new Date('2026-08-20T10:00:00Z') });
+  assert.equal(result.expected_airports, 9);
+  assert.equal(result.validated_airports, 9);
+  assert.equal(result.validation_status, 'pass');
+  assert.equal(new Set(result.airports.map(item => item.iata)).size, 9);
+});
+
+test('search parameter mismatch prevents form submission', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({ hiddenValueOverrides: { to_date_1: '11:00' } });
+  const scraper = new QeeqScraper({ baseUrl: 'https://www.qeeq.pl', driverAge: '30-60', residenceCountryCode: 'PL' }, { launchBrowser: fake.launchBrowser, sleep: async () => {} });
+  const outcome = await scraper.runScenario({ key: 'ktw|2026-09-19|2', airport: { iata: 'KTW' }, pickupDate: '2026-09-19', pickupTime: '10:00', dropoffDate: '2026-09-21', dropoffTime: '10:00', rentalDays: 2 });
+  assert.equal(outcome.error_code, 'search_parameter_mismatch');
+  assert.equal(fake.submitted, false);
+});
+
+test('transient scenario retry creates only one fresh context', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({ failSessions: [1] });
+  const scraper = new QeeqScraper({ baseUrl: 'https://www.qeeq.pl', driverAge: '30-60', residenceCountryCode: 'PL' }, { launchBrowser: fake.launchBrowser, sleep: async () => {} });
+  const outcome = await scraper.runScenario({ key: 'ktw|2026-09-19|2', airport: { iata: 'KTW' }, pickupDate: '2026-09-19', pickupTime: '10:00', dropoffDate: '2026-09-21', dropoffTime: '10:00', rentalDays: 2 });
+  assert.equal(outcome.offers[0].provider_name, 'CARWIZ');
+  assert.equal(fake.contextsCreated, 2);
+});
+
+test('unknown network schema falls back to scoped DOM with a quality error', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({ networkPayload: { changed: true } });
+  const scraper = new QeeqScraper({ baseUrl: 'https://www.qeeq.pl', driverAge: '30-60', residenceCountryCode: 'PL' }, { launchBrowser: fake.launchBrowser, sleep: async () => {} });
+  const outcome = await scraper.runScenario({ key: 'ktw|2026-09-19|2', airport: { iata: 'KTW' }, pickupDate: '2026-09-19', pickupTime: '10:00', dropoffDate: '2026-09-21', dropoffTime: '10:00', rentalDays: 2 });
+  assert.equal(outcome.quality_errors.includes('network_schema_unrecognized'), true);
+  assert.equal(outcome.groups.length > 0, true);
+});
+
+test('missing scoped rating count remains null', () => {
+  const fixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { parseObservedListPayload, parseOfferSnapshot } = require('../src/qeeq/scraper');
+  const offer = parseOfferSnapshot({ ...fixture.offer, ratingCountText: null }, { rentalDays: 2, vehicle: fixture.vehicle }, parseObservedListPayload(apiFixture));
+  assert.equal(offer.provider_rating_count, null);
+});
+
+test('location validator fails ambiguous visible matches', async () => {
+  const fixture = require('./fixtures/qeeq-airport-autocomplete.json');
+  const { validateLiveLocationCatalog } = require('../src/qeeq/validateLocations');
+  const result = await validateLiveLocationCatalog({}, {
+    resolveAirport: async airport => airport.iata === 'KTW'
+      ? [fixture.find(item => item.iata === 'KTW'), fixture.find(item => item.iata === 'KTW')]
+      : fixture.find(item => item.iata === airport.iata),
+    now: () => new Date('2026-08-20T10:00:00Z')
+  });
+  assert.equal(result.validation_status, 'fail');
+  assert.equal(result.validated_airports, 8);
+  assert.equal(result.airports.find(item => item.iata === 'KTW').error_code, 'location_match_ambiguous');
+});
+
+test('location validator writes JSON atomically', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { writeAtomicJson } = require('../src/qeeq/validateLocations');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-locations-'));
+  const output = path.join(directory, 'locations.json');
+  try {
+    writeAtomicJson(output, { validation_status: 'pass' });
+    assert.deepEqual(JSON.parse(fs.readFileSync(output, 'utf8')), { validation_status: 'pass' });
+    assert.equal(fs.existsSync(`${output}.tmp`), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('scraper rejects dependency overrides outside the documented seam', () => {
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  assert.throws(() => new QeeqScraper({}, { page: {} }), /Unsupported QeeqScraper dependency override: page/);
+});
+
+test('location validator rejects missing current QEEQ IDs', async () => {
+  const fixture = require('./fixtures/qeeq-airport-autocomplete.json');
+  const { validateLiveLocationCatalog } = require('../src/qeeq/validateLocations');
+  const result = await validateLiveLocationCatalog({}, {
+    resolveAirport: async airport => {
+      const match = fixture.find(item => item.iata === airport.iata);
+      return airport.iata === 'KTW' ? { ...match, landmark: undefined } : match;
+    },
+    now: () => new Date('2026-08-20T10:00:00Z')
+  });
+  assert.equal(result.validation_status, 'fail');
+  assert.equal(result.airports.find(item => item.iata === 'KTW').error_code, 'location_id_missing');
+});
