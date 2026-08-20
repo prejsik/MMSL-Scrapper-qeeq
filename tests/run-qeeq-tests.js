@@ -1200,3 +1200,185 @@ test('auxiliary reports reject a Windows case-variant output collision without o
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('merge preserves partial failures and deterministic scenario order', () => {
+  const { mergePayloads } = require('../src/qeeq/mergeResults');
+  const merged = mergePayloads([
+    { file: 'part-b.json', payload: { schema_version: 1, expected_scenarios: 1, expected_checks: 1, scenarios: [{ key: 'b', offers: [] }], errors: [{ scenario_key: 'b' }] } },
+    { file: 'part-a.json', payload: { schema_version: 1, expected_scenarios: 1, expected_checks: 1, scenarios: [{ key: 'a', status: 'success', offers: [{ record_type: 'offer', provider_name: 'PUBLIC PROVIDER', price_tier: 'public', price_verified: true, total_price: 119, currency: 'PLN' }] }], errors: [] } }
+  ], { expectedScenarioKeys: ['a', 'b'] });
+  assert.deepEqual(merged.scenarios.map(item => item.key), ['a', 'b']);
+  assert.equal(merged.expected_scenarios, 2);
+  assert.equal(merged.completed_scenarios, 2);
+  assert.equal(merged.completed_checks, 1);
+  assert.equal(merged.failed_checks, 1);
+  assert.equal(merged.quality.verified_public_offer_count, 1);
+  assert.equal(merged.run_status, 'partial');
+  assert.equal(merged.quality_status, 'warning');
+  assert.deepEqual(merged.errors, [{ code: 'execution_failed', scenario_key: 'b' }]);
+});
+
+test('merge rejects duplicate scenario keys and incompatible schema versions', () => {
+  const { mergePayloads } = require('../src/qeeq/mergeResults');
+  const duplicate = { schema_version: 1, scenarios: [{ key: 'a', offers: [] }], errors: [] };
+  assert.throws(() => mergePayloads([{ file: 'one.json', payload: duplicate }, { file: 'two.json', payload: duplicate }]), /Duplicate scenario key: a/);
+  assert.throws(() => mergePayloads([{ file: 'old.json', payload: { schema_version: 2, scenarios: [] } }]), /Unsupported schema_version 2/);
+});
+
+test('merge records missing expected scenarios without silently shrinking workload', () => {
+  const { mergePayloads } = require('../src/qeeq/mergeResults');
+  const publicOffer = { record_type: 'offer', provider_name: 'PUBLIC', price_tier: 'public', price_verified: true, total_price: 100, currency: 'PLN' };
+  const partial = mergePayloads([{ file: 'one.json', payload: { schema_version: 1, expected_scenarios: 2, expected_checks: 2, scenarios: [{ key: 'a', status: 'success', offers: [publicOffer] }], errors: [] } }]);
+  assert.equal(partial.expected_scenarios, 2);
+  assert.equal(partial.run_status, 'partial');
+  assert.equal(partial.quality_status, 'warning');
+  assert.deepEqual(partial.errors, [{ code: 'missing_chunk_scenario', scenario_key: null }]);
+
+  const failed = mergePayloads([], { expectedScenarioKeys: ['a'] });
+  assert.equal(failed.expected_scenarios, 1);
+  assert.equal(failed.run_status, 'failure');
+  assert.equal(failed.quality_status, 'fail');
+  assert.deepEqual(failed.errors, [{ code: 'missing_chunk_scenario', scenario_key: 'a' }]);
+});
+
+test('merge validates requested option sets and preserves sanitized quality signals', () => {
+  const { mergePayloads } = require('../src/qeeq/mergeResults');
+  const entry = {
+    file: 'part.json',
+    payload: {
+      schema_version: 1,
+      expected_scenarios: 1,
+      expected_checks: 1,
+      options: { start_dates: ['2026-09-19'], durations_days: [2], airport_keys: ['katowice-ktw'], limits: { max_scenarios: 7020 } },
+      scenarios: [{ key: 'a', status: 'success', pickup_at: '2026-09-19T10:00:00', rental_days: 2, airport_key: 'katowice-ktw', offers: [{ record_type: 'offer', provider_name: 'PUBLIC', price_tier: 'public', price_verified: true, total_price: 100, currency: 'PLN' }], quality_errors: ['location_id_drift'], errors: [] }],
+      errors: [],
+      quality: { quality_errors: ['chunk_truncated'] }
+    }
+  };
+  const merged = mergePayloads([entry]);
+  assert.deepEqual(merged.quality.quality_errors, ['chunk_truncated', 'location_id_drift']);
+  assert.equal(merged.quality_status, 'warning');
+
+  const badOptions = structuredClone(entry);
+  badOptions.payload.options.durations_days = [3];
+  assert.throws(() => mergePayloads([badOptions]), /Scenario a is outside requested durations_days/);
+
+  const otherLimits = structuredClone(entry);
+  otherLimits.file = 'other.json';
+  otherLimits.payload.scenarios[0].key = 'b';
+  otherLimits.payload.options.limits = { max_scenarios: 10 };
+  assert.throws(() => mergePayloads([entry, otherLimits]), /Incompatible requested option limits/);
+});
+
+test('merge discovers JSON chunks recursively in deterministic order', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { findJsonFiles, readJsonPayloads } = require('../src/qeeq/mergeResults');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-merge-files-'));
+  try {
+    fs.mkdirSync(path.join(directory, 'z'));
+    fs.mkdirSync(path.join(directory, 'a'));
+    fs.writeFileSync(path.join(directory, 'z', 'part-b.json'), '{"schema_version":1,"scenarios":[]}');
+    fs.writeFileSync(path.join(directory, 'a', 'part-a.json'), '{"schema_version":1,"scenarios":[]}');
+    fs.writeFileSync(path.join(directory, 'ignored.txt'), '{}');
+    assert.deepEqual(findJsonFiles(directory).map(file => path.relative(directory, file).replace(/\\/g, '/')), ['a/part-a.json', 'z/part-b.json']);
+    assert.deepEqual(readJsonPayloads(directory).map(entry => path.relative(directory, entry.file).replace(/\\/g, '/')), ['a/part-a.json', 'z/part-b.json']);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('merge CLI writes both outputs atomically after complete preflight', () => {
+  const { spawnSync } = require('node:child_process');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { parseMergeArgs } = require('../src/qeeq/mergeResults');
+  const mergeScript = path.resolve(__dirname, '../src/qeeq/mergeResults.js');
+  const runMerge = args => spawnSync(process.execPath, [mergeScript, ...args], { cwd: path.resolve(__dirname, '..'), encoding: 'utf8' });
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-merge-cli-'));
+  const inputDir = path.join(directory, 'parts');
+  const outputJson = path.join(directory, 'merged.json');
+  const outputCsv = path.join(directory, 'merged.csv');
+  const originalJson = 'original json';
+  const originalCsv = 'original csv';
+  try {
+    fs.mkdirSync(inputDir);
+    fs.writeFileSync(path.join(inputDir, 'part.json'), JSON.stringify({ schema_version: 1, expected_scenarios: 1, expected_checks: 1, scenarios: [{ key: 'a', status: 'success', offers: [{ record_type: 'offer', provider_name: 'PUBLIC', price_tier: 'public', price_verified: true, total_price: 100, currency: 'PLN' }], errors: [], quality_errors: [] }], errors: [] }));
+    fs.writeFileSync(outputJson, originalJson);
+    fs.writeFileSync(outputCsv, originalCsv);
+    assert.equal(runMerge(['--input-dir=' + inputDir, '--output-json=' + outputJson, '--output-csv=' + outputCsv]).status, 0);
+    assert.equal(JSON.parse(fs.readFileSync(outputJson, 'utf8')).run_status, 'success');
+    assert.match(fs.readFileSync(outputCsv, 'utf8'), /PUBLIC/);
+    assert.equal(fs.readdirSync(directory).some(name => name.endsWith('.tmp') || name.endsWith('.bak')), false);
+
+    fs.writeFileSync(outputJson, originalJson);
+    fs.writeFileSync(outputCsv, originalCsv);
+    assert.equal(runMerge(['--input-dir=' + inputDir, '--output-json=' + outputJson, '--output-csv=' + outputJson]).status, 1);
+    assert.equal(fs.readFileSync(outputJson, 'utf8'), originalJson);
+    assert.equal(fs.readFileSync(outputCsv, 'utf8'), originalCsv);
+    assert.equal(runMerge(['--input-dir=' + inputDir, '--output-json=' + path.join(inputDir, 'part.json'), '--output-csv=' + outputCsv]).status, 1);
+    assert.equal(runMerge(['--help']).status, 0);
+    assert.deepEqual(parseMergeArgs(['--input-dir=x', '--output-json=y', '--output-csv=z']), { inputDir: 'x', outputJson: 'y', outputCsv: 'z' });
+    assert.throws(() => parseMergeArgs(['--wat']), /Unknown option/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('merge rejects forbidden QEEQ session and offer business identifiers', () => {
+  const { mergePayloads } = require('../src/qeeq/mergeResults');
+  for (const field of ['clid', 'ticket', 'qeeq_fpt', 'businessId', 'businessBid']) {
+    assert.throws(() => mergePayloads([{ file: 'unsafe.json', payload: { schema_version: 1, scenarios: [{ key: 'a', [field]: 'secret', offers: [] }] } }]), /Forbidden field/);
+  }
+});
+
+test('merge requires comparable option declarations and stable source URLs', () => {
+  const { mergePayloads } = require('../src/qeeq/mergeResults');
+  const withOptions = {
+    file: 'one.json',
+    payload: {
+      schema_version: 1, expected_scenarios: 1, expected_checks: 1,
+      options: { start_dates: ['2026-09-19'], durations_days: [2], airport_keys: ['katowice-ktw'], limits: {} },
+      scenarios: [{ key: 'a', status: 'success', pickup_at: '2026-09-19T10:00:00', rental_days: 2, airport_key: 'katowice-ktw', offers: [] }]
+    }
+  };
+  const withoutOptions = { file: 'two.json', payload: { schema_version: 1, expected_scenarios: 1, scenarios: [{ key: 'b', offers: [] }] } };
+  assert.throws(() => mergePayloads([withOptions, withoutOptions]), /Incompatible requested option declarations/);
+
+  const differentConcurrency = structuredClone(withOptions);
+  const secondConcurrency = structuredClone(withOptions);
+  differentConcurrency.payload.options.concurrency = 1;
+  secondConcurrency.file = 'two.json';
+  secondConcurrency.payload.scenarios[0].key = 'b';
+  secondConcurrency.payload.options.concurrency = 2;
+  assert.throws(() => mergePayloads([differentConcurrency, secondConcurrency]), /Incompatible requested option concurrency/);
+
+  const unsafeUrl = structuredClone(withOptions);
+  unsafeUrl.payload.scenarios[0].offers = [{ record_type: 'offer', provider_name: 'PUBLIC', source_search_url: 'https://www.qeeq.pl/car/search?id=secret' }];
+  assert.throws(() => mergePayloads([unsafeUrl]), /Unsafe source_search_url/);
+});
+
+test('merge preserves safe root errors for absent scenario keys and validates expected key arrays', () => {
+  const { mergePayloads } = require('../src/qeeq/mergeResults');
+  const merged = mergePayloads([{ file: 'part.json', payload: { schema_version: 1, expected_scenarios: 1, scenarios: [], errors: [{ code: 'navigation_timeout', scenario_key: 'missing:2026-09-19:2' }] } }]);
+  assert.deepEqual(merged.errors, [
+    { code: 'navigation_timeout', scenario_key: 'missing:2026-09-19:2' },
+    { code: 'missing_chunk_scenario', scenario_key: null }
+  ]);
+  assert.throws(() => mergePayloads([], { expectedScenarioKeys: 'a' }), /must be an array/);
+  assert.throws(() => mergePayloads([], { expectedScenarioKeys: [''] }), /Invalid expected scenario key/);
+  assert.throws(() => mergePayloads([], { expectedScenarioKeys: ['a', 'a'] }), /Duplicate expected scenario key/);
+});
+
+test('merge module exposes only the documented pure interfaces', () => {
+  assert.deepEqual(Object.keys(require('../src/qeeq/mergeResults')).sort(), ['findJsonFiles', 'mergePayloads', 'parseMergeArgs', 'readJsonPayloads']);
+});
+
+test('merge output is deterministic when chunks omit capture timestamps', () => {
+  const { mergePayloads } = require('../src/qeeq/mergeResults');
+  const entries = [{ file: 'part.json', payload: { schema_version: 1, expected_scenarios: 1, scenarios: [{ key: 'a', status: 'success', offers: [{ record_type: 'offer', provider_name: 'PUBLIC', price_tier: 'public', price_verified: true, total_price: 100, currency: 'PLN' }] }] } }];
+  assert.deepEqual(mergePayloads(entries), mergePayloads(entries));
+  assert.equal(mergePayloads(entries).started_at, null);
+});
