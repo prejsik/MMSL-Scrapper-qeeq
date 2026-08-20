@@ -306,8 +306,12 @@ test('group-only observations do not enter Top 3', () => {
 
 test('sidebar filter values never populate an offer', () => {
   const fixture = require('./fixtures/qeeq-expanded-group-ktw.json');
-  const { parseOfferSnapshot } = require('../src/qeeq/scraper');
-  const offer = parseOfferSnapshot({ ...fixture.offer, ratingText: '', depositText: '' }, { rentalDays: 2, vehicle: fixture.vehicle }, new Map());
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { parseObservedListPayload, parseOfferSnapshot } = require('../src/qeeq/scraper');
+  const providers = parseObservedListPayload(apiFixture);
+  const offer = parseOfferSnapshot({ ...fixture.offer, ratingText: '', depositText: '' }, { rentalDays: 2, vehicle: fixture.vehicle }, providers);
+  assert.equal(offer.record_type, 'offer');
+  assert.equal(offer.provider_name, 'CARWIZ');
   assert.equal(offer.provider_rating, null);
   assert.equal(offer.deposit_amount, null);
 });
@@ -319,4 +323,117 @@ test('missing and ambiguous business-key matches never invent a provider', () =>
   assert.equal(resolveProviderForOffer(fixture.offer, new Map()).quality_error, 'provider_unresolved');
   const ambiguous = new Map([[key, [{ providerName: 'A' }, { providerName: 'B' }]]]);
   assert.equal(resolveProviderForOffer(fixture.offer, ambiguous).quality_error, 'provider_ambiguous');
+});
+
+test('missing and ambiguous provider joins stay diagnostic end to end', () => {
+  const fixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const { buildOfferBusinessKey, parseOfferSnapshot } = require('../src/qeeq/scraper');
+  const publicSnapshot = { ...fixture.offer, displayedAmount: '119 zł', discountType: null, diamondAmount: null };
+  const assertDiagnostic = (record, error) => {
+    assert.equal(record.record_type, 'group');
+    assert.equal(record.provider_name, undefined);
+    assert.equal(record.total_price, undefined);
+    assert.equal(record.price_verified, false);
+    assert.deepEqual(record.quality_errors, [error]);
+  };
+
+  assertDiagnostic(parseOfferSnapshot(publicSnapshot, { rentalDays: 2, vehicle: fixture.vehicle }, new Map()), 'provider_unresolved');
+  const key = buildOfferBusinessKey(fixture.offer.businessId, fixture.offer.businessBid);
+  const ambiguous = new Map([[key, [{ providerName: 'A' }, { providerName: 'B' }]]]);
+  assertDiagnostic(parseOfferSnapshot(publicSnapshot, { rentalDays: 2, vehicle: fixture.vehicle }, ambiguous), 'provider_ambiguous');
+  const invalidNamed = new Map([[key, [{ providerName: '   ' }]]]);
+  assertDiagnostic(parseOfferSnapshot(publicSnapshot, { rentalDays: 2, vehicle: fixture.vehicle }, invalidNamed), 'provider_unresolved');
+});
+
+test('missing blank and duplicate shops cannot produce an offer', () => {
+  const fixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { parseObservedListPayload, parseOfferSnapshot } = require('../src/qeeq/scraper');
+  const publicSnapshot = { ...fixture.offer, displayedAmount: '119 zł', discountType: null, diamondAmount: null };
+  const parseWithShops = shops => parseOfferSnapshot(
+    publicSnapshot,
+    { rentalDays: 2, vehicle: fixture.vehicle },
+    parseObservedListPayload({ data: { list: apiFixture.data.list, shops } })
+  );
+  const assertDiagnostic = (record, error) => {
+    assert.equal(record.record_type, 'group');
+    assert.equal(record.provider_name, undefined);
+    assert.equal(record.total_price, undefined);
+    assert.equal(record.price_verified, false);
+    assert.deepEqual(record.quality_errors, [error]);
+  };
+
+  assertDiagnostic(parseWithShops([]), 'provider_unresolved');
+  assertDiagnostic(parseWithShops([{ ...apiFixture.data.shops[0], name: '   ' }]), 'provider_unresolved');
+  assertDiagnostic(parseWithShops([
+    apiFixture.data.shops[0],
+    { ...apiFixture.data.shops[0], name: 'OTHER PROVIDER' }
+  ]), 'provider_ambiguous');
+});
+
+test('lone id and lone bid matches cannot produce an offer', () => {
+  const fixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { parseObservedListPayload, parseOfferSnapshot } = require('../src/qeeq/scraper');
+  const providers = parseObservedListPayload(apiFixture);
+  const context = { rentalDays: 2, vehicle: fixture.vehicle };
+  const publicSnapshot = { ...fixture.offer, displayedAmount: '119 zł', discountType: null, diamondAmount: null };
+  const snapshots = [
+    { ...publicSnapshot, businessId: 'different-id' },
+    { ...publicSnapshot, businessBid: 'different-bid' }
+  ];
+
+  for (const snapshot of snapshots) {
+    const record = parseOfferSnapshot(snapshot, context, providers);
+    assert.equal(record.record_type, 'group');
+    assert.equal(record.provider_name, undefined);
+    assert.equal(record.total_price, undefined);
+    assert.equal(record.price_verified, false);
+    assert.deepEqual(record.quality_errors, ['provider_unresolved']);
+  }
+});
+
+test('discount disagreement stays conditional and API origin alone is not a reference price', () => {
+  const fixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { buildOfferBusinessKey, parseObservedListPayload, parseOfferSnapshot } = require('../src/qeeq/scraper');
+  const providers = parseObservedListPayload(apiFixture);
+  const key = buildOfferBusinessKey(fixture.offer.businessId, fixture.offer.businessBid);
+  providers.get(key)[0].bestPriceInfo = { discount_type: 'other_coupon' };
+  providers.get(key)[0].originPriceInfo = { price: 150 };
+
+  const offer = parseOfferSnapshot(fixture.offer, { rentalDays: 2, vehicle: fixture.vehicle }, providers);
+  assert.equal(offer.record_type, 'offer');
+  assert.equal(offer.total_price, null);
+  assert.equal(offer.price_tier, 'conditional');
+  assert.equal(offer.price_verified, false);
+  assert.equal(offer.reference_price, null);
+  assert.deepEqual(offer.quality_errors, ['discount_type_mismatch']);
+});
+
+test('malformed parser inputs remain unresolved without throwing', () => {
+  const fixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { parseGroupSnapshot, parseObservedListPayload, parseOfferSnapshot } = require('../src/qeeq/scraper');
+  assert.doesNotThrow(() => parseObservedListPayload({ data: { shops: [null], list: [null, { meal_list: [null] }] } }));
+  assert.equal(parseObservedListPayload(null).size, 0);
+  assert.equal(parseObservedListPayload({ data: { shops: {}, list: {} } }).size, 0);
+  assert.deepEqual(parseGroupSnapshot(null, null), {
+    record_type: 'group',
+    vehicle_name: null,
+    price_verified: false,
+    rental_days: null,
+    parsing_source: 'dom'
+  });
+  const record = parseOfferSnapshot(fixture.offer, { rentalDays: 2, vehicle: fixture.vehicle }, {});
+  assert.equal(record.record_type, 'group');
+  assert.equal(record.provider_name, undefined);
+  assert.equal(record.total_price, undefined);
+  assert.equal(record.price_verified, false);
+  assert.deepEqual(record.quality_errors, ['provider_unresolved']);
+  const providers = parseObservedListPayload(apiFixture);
+  const noContext = parseOfferSnapshot({ ...fixture.offer, discountType: null, diamondAmount: null }, null, providers);
+  assert.equal(noContext.total_price, null);
+  assert.equal(noContext.price_verified, false);
+  assert.doesNotThrow(() => parseOfferSnapshot(null, null, null));
 });
