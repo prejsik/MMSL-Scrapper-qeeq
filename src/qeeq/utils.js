@@ -5,10 +5,10 @@ const MONEY_MARKER = /(?:\b(?:PLN|EUR|USD|GBP)\b|zł|€|\$|£)/i;
 const MONEY_AMOUNT = '(?:\\d{1,3}(?:[ .\\u00a0]\\d{3})+|\\d+)(?:[,.]\\d+)?';
 const MONEY_CURRENCY = '(?:\\b(?:PLN|EUR|USD|GBP)\\b|zł|€|\\$|£)';
 const INVALID_MONEY_LABELS = ['ocena', 'rating', 'depozyt', 'deposit'];
-const CONDITIONAL_LABEL = /diament|diamond|member|członk|login|zaloguj/i;
+const CONDITIONAL_LABEL = /diament|diamond|member|członk|log\s*in|sign\s*in|zaloguj/i;
 const REDACTED_FIELD = /\b(id|clid|_vv_|fpt|ticket|ts|qeeq_fpt)\b\s*=\s*(?:"[^"]*"|'[^']*'|[^\s&#,;"']+)/gi;
-const REDACTED_HEADER = /\b(cookie|authorization)\s*:\s*[^\r\n]*/gi;
-const REDACTED_BEARER = /\bbearer\s+[^\s,;"']+/gi;
+const REDACTED_HEADER = /\b(cookie|authorization)\s*(?::|=)\s*[^\r\n]*/gi;
+const REDACTED_BEARER = /\bbearer\s+(?:"[^"]*"|'[^']*'|[^\s,;"']+)/gi;
 const FORBIDDEN_CSV_KEYS = new Set(['id', 'clid', '_vv_', 'fpt', 'ticket', 'ts', 'qeeq_fpt']);
 
 function parseAmount(value) {

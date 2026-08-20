@@ -242,3 +242,20 @@ test('CSV neutralizes string formulas but preserves numeric negatives', () => {
   const { toCsv } = require('../src/qeeq/utils');
   assert.equal(toCsv([{ formula: '=SUM(1,1)', negative: -2 }]), '"formula","negative"\n"\'=SUM(1,1)","-2"');
 });
+
+test('spaced Log in and Sign in labels block public price ranking', () => {
+  const { normalizePriceCandidate, rankVerifiedPublicOffers } = require('../src/qeeq/utils');
+  const base = { displayedText: 'Cena 119 zł', rentalPeriodText: 'łącznie za 2 dni', rentalDays: 2 };
+  const offers = ['Log in to continue', 'Sign in to continue'].map((memberText, index) => ({
+    id: `conditional-${index}`,
+    ...normalizePriceCandidate({ ...base, memberText })
+  }));
+  assert.deepEqual(offers.map(offer => offer.total_price), [null, null]);
+  assert.deepEqual(rankVerifiedPublicOffers(offers), []);
+});
+
+test('diagnostics redact quoted Bearer tokens and equals-style credential headers', () => {
+  const { sanitizeDiagnosticText } = require('../src/qeeq/utils');
+  const clean = sanitizeDiagnosticText('Bearer "synthetic-bearer-secret"\nCookie = sid=synthetic-cookie-secret\nAuthorization = Bearer \'synthetic-authorization-secret\'');
+  assert.doesNotMatch(clean, /synthetic-bearer-secret|synthetic-cookie-secret|synthetic-authorization-secret/);
+});
