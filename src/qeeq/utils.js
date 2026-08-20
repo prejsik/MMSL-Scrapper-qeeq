@@ -1,12 +1,11 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-const MONEY_MARKER = /(?:\b(?:PLN|EUR|USD|GBP)\b|zł|€|\$|£)/i;
 const MONEY_AMOUNT = '(?:\\d{1,3}(?:[ .\\u00a0]\\d{3})+|\\d+)(?:[,.]\\d+)?';
 const MONEY_CURRENCY = '(?:\\b(?:PLN|EUR|USD|GBP)\\b|zł|€|\\$|£)';
 const INVALID_MONEY_LABELS = ['ocena', 'rating', 'depozyt', 'deposit'];
 const CONDITIONAL_LABEL = /diament|diamond|member|członk|log\s*in|sign\s*in|zaloguj/i;
-const REDACTED_FIELD = /\b(id|clid|_vv_|fpt|ticket|ts|qeeq_fpt)\b\s*=\s*(?:"[^"]*"|'[^']*'|[^\s&#,;"']+)/gi;
+const REDACTED_FIELD = /\b(id|bid|clid|_vv_|fpt|ticket|ts|qeeq_fpt)\b\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|[^\s&#,;"']+)/gi;
 const REDACTED_HEADER = /\b(cookie|authorization)\s*(?::|=)\s*[^\r\n]*/gi;
 const REDACTED_BEARER = /\bbearer\s+(?:"[^"]*"|'[^']*'|[^\s,;"']+)/gi;
 const FORBIDDEN_CSV_KEYS = new Set(['id', 'clid', '_vv_', 'fpt', 'ticket', 'ts', 'qeeq_fpt']);
@@ -15,6 +14,18 @@ function parseAmount(value) {
   const normalized = value.replace(/[ .\u00a0]/g, '').replace(',', '.');
   const amount = Number(normalized);
   return Number.isFinite(amount) && amount > 0 ? amount : null;
+}
+
+function explicitCurrency(raw) {
+  if (typeof raw !== 'string') return null;
+  if (/zł/i.test(raw)) return 'PLN';
+  if (raw.includes('€')) return 'EUR';
+  if (raw.includes('$')) return 'USD';
+  if (raw.includes('£')) return 'GBP';
+  const known = /\b(PLN|EUR|USD|GBP)\b/i.exec(raw);
+  if (known) return known[1].toUpperCase();
+  const isoCode = /\b[A-Z]{3}\b/.exec(raw);
+  return isoCode ? isoCode[0] : null;
 }
 
 function parseMoney(raw, fallbackCurrency, options = {}) {
@@ -28,7 +39,7 @@ function parseMoney(raw, fallbackCurrency, options = {}) {
   const currencyBeforeAmount = new RegExp(`${MONEY_CURRENCY}\\s*(${MONEY_AMOUNT})`, 'i').exec(raw);
   const currencyMatch = amountBeforeCurrency || currencyBeforeAmount;
   if (currencyMatch) return parseAmount(currencyMatch[1]);
-  if (!fallbackCurrency || MONEY_MARKER.test(raw)) return null;
+  if (!fallbackCurrency || explicitCurrency(raw)) return null;
 
   const candidates = [...raw.matchAll(new RegExp(MONEY_AMOUNT, 'g'))];
   const amountCandidate = candidates.find(candidate => !/^\s*(?:dni|dzień|dnia)\b/i.test(raw.slice(candidate.index + candidate[0].length)));
@@ -47,14 +58,20 @@ function normalizePriceCandidate(input) {
   const verifiedTotal = hasVerifiedTotalPeriod(input?.rentalPeriodText, rentalDays);
   const displayedAmount = parseMoney(input?.displayedText, input?.fallbackCurrency);
   const memberAmount = parseMoney(input?.memberText, input?.fallbackCurrency);
+  const displayedCurrency = explicitCurrency(input?.displayedText);
+  const memberCurrency = explicitCurrency(input?.memberText);
+  const fallbackCurrency = typeof input?.fallbackCurrency === 'string' ? input.fallbackCurrency.toUpperCase() : null;
+  const expectedCurrency = 'PLN';
+  const unexpectedCurrency = [displayedCurrency, memberCurrency, fallbackCurrency]
+    .find(currency => currency && currency !== expectedCurrency) || null;
   const displayedIsConditional = Boolean(input?.discountType)
     || (typeof input?.displayedText === 'string' && CONDITIONAL_LABEL.test(input.displayedText))
     || (memberAmount === null && typeof input?.memberText === 'string' && CONDITIONAL_LABEL.test(input.memberText));
   const hasConditionalPrice = displayedIsConditional || memberAmount !== null;
   const conditionalOffer = displayedIsConditional ? displayedAmount : null;
   const conditionalMember = memberAmount;
-  const conditionalVerified = verifiedTotal && (conditionalOffer !== null || conditionalMember !== null);
-  const publicVerified = verifiedTotal && !displayedIsConditional && displayedAmount !== null;
+  const conditionalVerified = verifiedTotal && !unexpectedCurrency && (conditionalOffer !== null || conditionalMember !== null);
+  const publicVerified = verifiedTotal && !unexpectedCurrency && !displayedIsConditional && displayedAmount !== null;
 
   return {
     total_price: publicVerified ? displayedAmount : null,
@@ -67,7 +84,9 @@ function normalizePriceCandidate(input) {
     price_tier: publicVerified ? 'public' : (hasConditionalPrice ? 'conditional' : 'unknown'),
     price_scope: verifiedTotal ? 'total' : 'unknown',
     price_verified: publicVerified,
-    conditional_price_verified: conditionalVerified
+    conditional_price_verified: conditionalVerified,
+    currency: unexpectedCurrency || displayedCurrency || memberCurrency || fallbackCurrency || expectedCurrency,
+    quality_errors: unexpectedCurrency ? ['unexpected_currency'] : []
   };
 }
 

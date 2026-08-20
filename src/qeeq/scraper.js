@@ -1,4 +1,5 @@
 const { normalizePriceCandidate, parseMoney, rankVerifiedPublicOffers, sanitizeSourceUrl } = require('./utils');
+const { createFailureArtifactSession } = require('./diagnostics');
 const { normalizeLocationKey } = require('./locations');
 
 const SELECTORS = Object.freeze({
@@ -467,11 +468,12 @@ function parseOfferSnapshot(snapshot, context = {}, providerMetadata = new Map()
     deposit_currency: 'PLN',
     ...price,
     reference_price: safeSnapshot.referencePriceText ? parseMoney(safeSnapshot.referencePriceText, 'PLN') : null,
-    currency: 'PLN',
     rental_days: safeContext.rentalDays ?? null,
     parsing_source: 'hybrid'
   };
-  if (discountMismatch) result.quality_errors = ['discount_type_mismatch'];
+  const qualityErrors = [...(price.quality_errors || [])];
+  if (discountMismatch) qualityErrors.push('discount_type_mismatch');
+  if (qualityErrors.length) result.quality_errors = [...new Set(qualityErrors)];
   return result;
 }
 
@@ -823,6 +825,8 @@ async function extractResults(page, scenario, config, providerMetadata, sourceSe
     if (!isOpen) {
       const visibleSupplierButton = await firstVisibleLocator(supplierButton);
       if (!visibleSupplierButton) {
+        diagnostic = { ...diagnostic, quality_errors: ['group_expansion_timeout'] };
+        qualityErrors.push('group_expansion_timeout');
         groups.push(diagnostic);
         continue;
       }
@@ -844,7 +848,11 @@ async function extractResults(page, scenario, config, providerMetadata, sourceSe
         break;
       }
       const snapshot = await readOfferSnapshot(anchor);
-      if (!snapshot) continue;
+      if (!snapshot) {
+        diagnostic = { ...diagnostic, quality_errors: [...new Set([...(diagnostic.quality_errors || []), 'price_unverified'])] };
+        qualityErrors.push('price_unverified');
+        continue;
+      }
       vehicle = {
         vehicleName,
         transmission: snapshot.transmission,
@@ -852,12 +860,15 @@ async function extractResults(page, scenario, config, providerMetadata, sourceSe
         doors: snapshot.doors,
         luggage: snapshot.luggage
       };
-      diagnostic = parseGroupSnapshot(vehicle, scenario);
+      diagnostic = {
+        ...parseGroupSnapshot(vehicle, scenario),
+        ...(diagnostic.quality_errors ? { quality_errors: diagnostic.quality_errors } : {})
+      };
       const parsed = parseOfferSnapshot(snapshot, { rentalDays: scenario.rentalDays, vehicle }, providerMetadata);
       if (parsed.record_type === 'offer') {
         offers.push({ ...parsed, source_search_url: sourceSearchUrl, captured_at: capturedAt });
       } else {
-        diagnostic = { ...diagnostic, quality_errors: parsed.quality_errors };
+        diagnostic = { ...diagnostic, quality_errors: [...new Set([...(diagnostic.quality_errors || []), ...(parsed.quality_errors || [])])] };
         qualityErrors.push(...(parsed.quality_errors || []));
       }
     }
@@ -903,13 +914,16 @@ class QeeqScraper {
   async runAttempt(scenario, attempt) {
     let browser;
     let context;
+    let page;
     let observation;
     let result;
     let operationError = null;
+    const diagnostics = createFailureArtifactSession(this.config, scenario, attempt, this.now);
     try {
       browser = await this.launchBrowser();
       context = await browser.newContext({ locale: 'pl-PL', timezoneId: this.config.timeZone || 'Europe/Warsaw' });
-      const page = await context.newPage();
+      page = await context.newPage();
+      diagnostics.attach(page);
       page.setDefaultTimeout?.(this.config.resultsTimeoutMs ?? 30000);
       await page.goto(this.config.baseUrl || 'https://www.qeeq.pl', {
         waitUntil: 'domcontentloaded',
@@ -955,10 +969,19 @@ class QeeqScraper {
         captured_at: capturedAt
       };
     } catch (error) {
+      try {
+        const artifacts = await diagnostics.capture(error);
+        if (artifacts.length) Object.defineProperty(error, 'qeeqArtifacts', { value: artifacts });
+      } catch {}
       operationError = error;
     }
     try {
       observation?.dispose();
+    } catch (error) {
+      operationError ||= error;
+    }
+    try {
+      diagnostics.dispose();
     } catch (error) {
       operationError ||= error;
     }
@@ -981,7 +1004,8 @@ class QeeqScraper {
           groups: [],
           offers: [],
           errors: [{ code: errorCode }],
-          quality_errors: []
+          quality_errors: [],
+          artifacts: Array.isArray(error?.qeeqArtifacts) ? error.qeeqArtifacts : []
         };
       }
       if (!shouldRetryScenario(outcome)) return outcome;
@@ -1004,6 +1028,7 @@ module.exports = {
   buildOfferBusinessKey,
   closeBrowserResources,
   dismissPolishPopups,
+  extractResults,
   mergeObservedProviderMetadata,
   observeListResponses,
   parseObservedListPayload,

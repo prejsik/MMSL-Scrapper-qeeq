@@ -2977,6 +2977,258 @@ test('README documents safety gate outputs and verification commands', () => {
   }
 });
 
+test('non-PLN price markers stay unverified and retain unexpected currency evidence', () => {
+  const fixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { parseObservedListPayload, parseOfferSnapshot } = require('../src/qeeq/scraper');
+  const { buildRootPayload, buildScenarioPayload } = require('../src/qeeq/run');
+  const { normalizePriceCandidate } = require('../src/qeeq/utils');
+  const providers = parseObservedListPayload(apiFixture);
+  const context = { rentalDays: 2, vehicle: fixture.vehicle };
+
+  for (const currency of ['EUR', 'CHF']) {
+    const offer = parseOfferSnapshot({
+      ...fixture.offer,
+      displayedAmount: `Cena 119 ${currency}`,
+      diamondAmount: null,
+      discountType: null,
+      rentalPeriodText: 'łącznie za 2 dni'
+    }, context, providers);
+    assert.equal(offer.record_type, 'offer');
+    assert.equal(offer.currency, currency);
+    assert.equal(offer.total_price, null);
+    assert.equal(offer.price_verified, false);
+    assert.deepEqual(offer.quality_errors, ['unexpected_currency']);
+
+    const scenario = buildScenarioPayload({
+      scenario: { key: `ktw:${currency}`, airport: { key: 'katowice-pyrzowice', iata: 'KTW' }, rentalDays: 2 },
+      outcome: { status: 'success', offers: [offer], groups: [], quality_errors: [] }
+    });
+    const root = buildRootPayload({ expected_checks: 1, scenarios: [scenario] });
+    assert.equal(root.quality.verified_public_offer_count, 0);
+    assert.deepEqual(root.quality.quality_errors, ['unexpected_currency']);
+    assert.equal(root.quality_status, 'fail');
+  }
+
+  const direct = normalizePriceCandidate({
+    displayedText: 'Cena 119 EUR', rentalPeriodText: 'łącznie za 2 dni', rentalDays: 2
+  });
+  assert.equal(direct.currency, 'EUR');
+  assert.equal(direct.price_verified, false);
+  assert.deepEqual(direct.quality_errors, ['unexpected_currency']);
+
+  const fallback = normalizePriceCandidate({
+    displayedText: 'Cena 119', fallbackCurrency: 'EUR', rentalPeriodText: 'łącznie za 2 dni', rentalDays: 2
+  });
+  assert.equal(fallback.currency, 'EUR');
+  assert.equal(fallback.price_verified, false);
+  assert.deepEqual(fallback.quality_errors, ['unexpected_currency']);
+});
+
+test('closed groups without a visible expansion control become quality diagnostics', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({ loadMoreCounts: [3] });
+  const outcome = await new QeeqScraper(task5Config(), {
+    launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep
+  }).runScenario(task5Scenario());
+
+  assert.equal(outcome.offers.length, 1);
+  assert.equal(outcome.quality_errors.includes('group_expansion_timeout'), true);
+  assert.deepEqual(outcome.groups[1].quality_errors, ['group_expansion_timeout']);
+  assert.deepEqual(outcome.groups[2].quality_errors, ['group_expansion_timeout']);
+  const { buildRootPayload, buildScenarioPayload } = require('../src/qeeq/run');
+  const canonical = buildScenarioPayload({ scenario: task5Scenario(), outcome: {
+    ...outcome,
+    offers: [{ record_type: 'offer', provider_name: 'PUBLIC', total_price: 119, daily_price: 59.5, currency: 'PLN', price_tier: 'public', price_verified: true }]
+  } });
+  const root = buildRootPayload({ expected_checks: 1, scenarios: [canonical] });
+  assert.equal(root.quality_status, 'warning');
+  assert.equal(root.quality.quality_errors.includes('group_expansion_timeout'), true);
+});
+
+test('visible anchors with unreadable snapshots become deterministic group diagnostics', async () => {
+  const { SELECTORS, extractResults } = require('../src/qeeq/scraper');
+  const empty = { count: async () => 0, isVisible: async () => false };
+  const text = value => {
+    const locator = { count: async () => 1, isVisible: async () => true, innerText: async () => value };
+    locator.nth = () => locator;
+    return locator;
+  };
+  const unreadableAnchor = {
+    count: async () => 1,
+    isVisible: async () => true,
+    locator: () => empty
+  };
+  const anchors = {
+    count: async () => 1,
+    isVisible: async () => true,
+    nth: () => unreadableAnchor
+  };
+  const group = {
+    locator: selector => {
+      if (selector === SELECTORS.vehicleName) return text('Unreadable vehicle');
+      if (selector === SELECTORS.supplierButton) return empty;
+      if (selector === SELECTORS.reserveAnchor) return anchors;
+      throw new Error(`Unexpected selector: ${selector}`);
+    },
+    evaluate: async () => true
+  };
+  const page = {
+    locator: selector => {
+      assert.equal(selector, SELECTORS.group);
+      return { count: async () => 1, nth: () => group };
+    }
+  };
+
+  const result = await extractResults(
+    page, { rentalDays: 2 }, task5Config(), new Map(),
+    'https://www.qeeq.pl/car/search', '2026-08-21T00:00:00.000Z', async () => {}
+  );
+  assert.deepEqual(result.qualityErrors, ['price_unverified']);
+  assert.deepEqual(result.groups[0].quality_errors, ['price_unverified']);
+  assert.deepEqual(result.offers, []);
+});
+
+test('scenario failures write bounded sanitized artifacts before cleanup and preserve the primary error', async () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const root = fs.mkdtempSync(path.join(process.cwd(), 'output', 'qeeq-failure-artifacts-'));
+  const artifactsDir = path.relative(process.cwd(), root);
+  const order = [];
+  const fake = createFakeQeeqBrowser({
+    contextCloseError: 'context_close_failed',
+    browserCloseError: 'browser_close_failed'
+  });
+  const launchBrowser = async () => {
+    const browser = await fake.launchBrowser();
+    const originalNewContext = browser.newContext;
+    const originalBrowserClose = browser.close;
+    browser.newContext = async options => {
+      const context = await originalNewContext(options);
+      const originalNewPage = context.newPage;
+      const originalContextClose = context.close;
+      context.newPage = async () => {
+        const page = await originalNewPage();
+        const originalGoto = page.goto.bind(page);
+        page.screenshot = async () => {
+          order.push('screenshot');
+          return Buffer.from('SAFE_PNG_BYTES');
+        };
+        page.evaluate = async () => 'Visible text UNLABELED_SECRET_123456789012345678901234567890';
+        page.goto = async url => {
+          await originalGoto(url);
+          for (let index = 0; index < 60; index += 1) {
+            for (const listener of page.listeners.get('console') || []) {
+              listener({ type: () => 'error', text: () => `console ${index} id=CONSOLE_SECRET_${index} https://www.qeeq.pl/car/search?ticket=URL_SECRET_${index}` });
+            }
+          }
+          for (const listener of page.listeners.get('requestfailed') || []) {
+            listener({
+              method: () => 'GET',
+              url: () => 'bid:REQUEST_SECRET',
+              failure: () => ({ errorText: 'ticket=FAILURE_SECRET Cookie: sid=COOKIE_SECRET' })
+            });
+          }
+          const error = new Error('failed ticket=ERROR_SECRET bid:BUSINESS_SECRET Authorization: Bearer AUTH_SECRET');
+          error.code = 'scenario_failed';
+          throw error;
+        };
+        return page;
+      };
+      context.close = async () => {
+        order.push('context-close');
+        return originalContextClose();
+      };
+      return context;
+    };
+    browser.close = async () => {
+      order.push('browser-close');
+      return originalBrowserClose();
+    };
+    return browser;
+  };
+
+  try {
+    const scenario = { ...task5Scenario(), key: 'id=SCENARIO_SECRET&bid=SCENARIO_BUSINESS_SECRET' };
+    const outcome = await new QeeqScraper(task5Config({ artifactsDir }), {
+      launchBrowser, now: fake.now, sleep: fake.sleep
+    }).runScenario(scenario);
+
+    assert.equal(outcome.status, 'failure');
+    assert.equal(outcome.error_code, 'scenario_failed');
+    assert.equal(order.indexOf('screenshot') < order.indexOf('context-close'), true);
+    assert.equal(order.indexOf('context-close') < order.indexOf('browser-close'), true);
+    assert.equal(fake.contextCloseAttempts, 1);
+    assert.equal(fake.browserCloseAttempts, 1);
+    assert.equal(Array.isArray(outcome.artifacts), true);
+    assert.equal(outcome.artifacts.length, 3);
+
+    const files = outcome.artifacts.map(relative => path.resolve(relative));
+    const errorPath = files.find(file => file.endsWith('error.json'));
+    const logPath = files.find(file => file.endsWith('browser.log'));
+    const screenshotPath = files.find(file => file.endsWith('screenshot.png'));
+    assert.ok(errorPath && logPath && screenshotPath);
+    assert.equal(fs.readFileSync(screenshotPath, 'utf8'), 'SAFE_PNG_BYTES');
+    assert.equal(fs.readdirSync(path.dirname(errorPath)).some(name => name.endsWith('.tmp')), false);
+    assert.equal(fs.readdirSync(path.dirname(errorPath)).some(name => name.includes('dom')), false);
+
+    const logLines = fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean);
+    assert.equal(logLines.length <= 50, true);
+    const text = files.filter(file => !file.endsWith('.png')).map(file => fs.readFileSync(file, 'utf8')).join('\n');
+    for (const secret of ['SCENARIO_SECRET', 'SCENARIO_BUSINESS_SECRET', 'CONSOLE_SECRET', 'URL_SECRET', 'REQUEST_SECRET', 'FAILURE_SECRET', 'COOKIE_SECRET', 'ERROR_SECRET', 'BUSINESS_SECRET', 'AUTH_SECRET', 'UNLABELED_SECRET']) {
+      assert.doesNotMatch(text, new RegExp(secret));
+    }
+    assert.doesNotMatch(text, /[?&](?:id|bid|clid|_vv_|fpt|ticket|ts)=|cookie|authorization|bearer/i);
+    assert.deepEqual(JSON.parse(fs.readFileSync(errorPath, 'utf8')).error_code, 'scenario_failed');
+    assert.equal((fake.pages[0].listeners.get('console') || []).length, 0);
+    assert.equal((fake.pages[0].listeners.get('requestfailed') || []).length, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('safe visible DOM and stable current URL are recorded with safe artifact references', async () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { createFailureArtifactSession } = require('../src/qeeq/diagnostics');
+  const root = fs.mkdtempSync(path.join(process.cwd(), 'output', 'qeeq-safe-artifacts-'));
+  const listeners = new Map();
+  const page = {
+    on: (event, listener) => listeners.set(event, listener),
+    off: event => listeners.delete(event),
+    url: () => 'https://www.qeeq.pl/car/search?id=SESSION_SECRET&ticket=TICKET_SECRET#fragment',
+    screenshot: async () => Buffer.from('SAFE_SCREENSHOT'),
+    evaluate: async () => 'Katowice KTW Public price 119 PLN Automatic'
+  };
+  try {
+    const session = createFailureArtifactSession(
+      { artifactsDir: path.relative(process.cwd(), root) },
+      { key: 'katowice-pyrzowice:2026-08-22:2' },
+      0,
+      () => new Date('2026-08-21T01:02:03.000Z')
+    );
+    session.attach(page);
+    const references = await session.capture(Object.assign(new Error('safe failure'), { code: 'scenario_failed' }));
+    const files = references.map(reference => path.resolve(reference));
+    const errorPath = files.find(file => file.endsWith('error.json'));
+    const domPath = files.find(file => file.endsWith('sanitized-dom.html'));
+    assert.ok(errorPath && domPath);
+    const envelope = JSON.parse(fs.readFileSync(errorPath, 'utf8'));
+    assert.equal(envelope.current_url, 'https://www.qeeq.pl/car/search');
+    assert.deepEqual(envelope.files.sort(), ['browser.log', 'sanitized-dom.html', 'screenshot.png']);
+    assert.equal(envelope.files.every(file => path.basename(file) === file), true);
+    const dom = fs.readFileSync(domPath, 'utf8');
+    assert.match(dom, /Katowice KTW Public price 119 PLN Automatic/);
+    assert.doesNotMatch(dom, /SESSION_SECRET|TICKET_SECRET|[?&#]|<script|href=|src=/i);
+    assert.equal(listeners.size, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('HTML redacts credential headers and QEEQ location identifiers in untrusted diagnostics', () => {
   const { buildHtmlReport } = require('../src/qeeq/reportHtml');
   const secrets = ['TOPSECRET', 'COOKIESECRET', 'CITYSECRET'];
