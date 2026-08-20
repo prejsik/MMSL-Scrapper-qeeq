@@ -277,6 +277,21 @@ function buildOfferBusinessKey(id, bid) {
   return JSON.stringify([stringId, stringBid]);
 }
 
+function parseReserveBusinessIdentity(input = {}) {
+  let hrefParams = null;
+  try {
+    hrefParams = new URL(typeof input.href === 'string' ? input.href : '', 'https://www.qeeq.pl').searchParams;
+  } catch {
+    hrefParams = null;
+  }
+  const component = (legacy, name) => {
+    if (legacy !== null && legacy !== undefined && String(legacy).trim()) return String(legacy);
+    const current = hrefParams?.get(name);
+    return current !== null && current !== undefined && current.trim() ? current : null;
+  };
+  return { id: component(input.id, 'id'), bid: component(input.bid, 'bid') };
+}
+
 function canonicalProviderName(name) {
   if (typeof name !== 'string') return null;
   const normalized = name.trim();
@@ -672,6 +687,11 @@ async function readOfferSnapshot(anchor) {
   const subtree = await firstVisibleLocator(anchor.locator(OFFER_ANCESTOR));
   if (!subtree) return null;
   const featureTexts = await subtree.locator(SELECTORS.feature).allTextContents();
+  const businessIdentity = parseReserveBusinessIdentity({
+    id: await anchor.getAttribute('id'),
+    bid: await anchor.getAttribute('bid'),
+    href: await anchor.getAttribute('href')
+  });
   return {
     ...snapshotOfferSubtree({
       supplierRatingText: await locatorText(subtree.locator(SELECTORS.supplierRating)),
@@ -681,8 +701,8 @@ async function readOfferSnapshot(anchor) {
       referencePriceText: await locatorText(subtree.locator(SELECTORS.referencePrice)),
       periodText: await locatorText(subtree.locator(SELECTORS.rentalDays))
     }),
-    businessId: await anchor.getAttribute('id'),
-    businessBid: await anchor.getAttribute('bid'),
+    businessId: businessIdentity.id,
+    businessBid: businessIdentity.bid,
     discountType: await anchor.getAttribute('list_discount_type')
   };
 }
@@ -939,6 +959,7 @@ module.exports = {
   dismissPolishPopups,
   parseObservedListPayload,
   parseAutocompleteIdentity,
+  parseReserveBusinessIdentity,
   resolveProviderForOffer,
   parseGroupSnapshot,
   parseOfferSnapshot,

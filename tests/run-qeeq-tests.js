@@ -2880,3 +2880,17 @@ test('current QEEQ LI time control uses the accessible half-hour slider and veri
   assert.equal(values[SELECTORS.pickupTimeValue], '10:00');
   assert.equal(sliderValue, 20);
 });
+
+test('current QEEQ reserve href yields only the exact fabricated id bid pair', () => {
+  const { parseReserveBusinessIdentity } = require('../src/qeeq/scraper');
+  assert.deepEqual(parseReserveBusinessIdentity({
+    href: '/car/booking?_vv_=SAFE_VIEW&bid=SAFE_BID&clid=SAFE_CLIENT&id=SAFE_ID&list_discount_type=SAFE_DISCOUNT'
+  }), { id: 'SAFE_ID', bid: 'SAFE_BID' });
+  assert.deepEqual(parseReserveBusinessIdentity({ id: 'LEGACY_ID', bid: 'LEGACY_BID', href: 'not a URL' }), {
+    id: 'LEGACY_ID', bid: 'LEGACY_BID'
+  });
+  assert.deepEqual(parseReserveBusinessIdentity({ href: '/car/booking?clid=SAFE_CLIENT' }), { id: null, bid: null });
+  assert.doesNotMatch(JSON.stringify(parseReserveBusinessIdentity({
+    href: '/car/booking?bid=SAFE_BID&clid=SAFE_CLIENT&id=SAFE_ID'
+  })), /clid|SAFE_CLIENT|href/);
+});
