@@ -662,11 +662,21 @@ function withTimeout(promise, timeoutMs) {
 function observeListResponses(page, timeoutMs, nowMillis = Date.now) {
   const responses = [];
   const waiters = [];
+  const qualityErrors = [];
+  const payloads = [];
+  let responseIndex = 0;
   let detached = false;
   const deadline = nowMillis() + timeoutMs;
   const listener = response => {
     if (!isObservedListResponse(response)) return;
-    responses.push(response);
+    if (nowMillis() > deadline) return;
+    let payloadPromise;
+    try {
+      payloadPromise = Promise.resolve(response.json()).catch(() => null);
+    } catch {
+      payloadPromise = Promise.resolve(null);
+    }
+    responses.push({ payloadPromise, acceptedAt: nowMillis() });
     while (waiters.length) waiters.shift()();
   };
   page.on('response', listener);
@@ -675,39 +685,39 @@ function observeListResponses(page, timeoutMs, nowMillis = Date.now) {
     detached = true;
     page.off?.('response', listener);
   };
+  const drain = async () => {
+    while (true) {
+      if (responseIndex >= responses.length) {
+        const remaining = deadline - nowMillis();
+        if (remaining <= 0) break;
+        const waitMs = payloads.length ? Math.min(25, remaining) : remaining;
+        const observation = await withTimeout(new Promise(resolve => waiters.push(resolve)), waitMs);
+        if (typeof observation === 'symbol') break;
+        continue;
+      }
+      const responsePayload = responses[responseIndex];
+      responseIndex += 1;
+      if (responsePayload.acceptedAt > deadline) continue;
+      const candidate = await withTimeout(responsePayload.payloadPromise, Math.max(1, deadline - nowMillis()));
+      if (typeof candidate === 'symbol') break;
+      if (supportedListPayload(candidate)) {
+        payloads.push(candidate);
+        continue;
+      }
+      qualityErrors.push('network_schema_unrecognized');
+    }
+    return { payload: payloads[0] || null, payloads: [...payloads], qualityErrors: [...new Set(qualityErrors)] };
+  };
   return {
+    async settle() {
+      return drain();
+    },
     async finish() {
-      const qualityErrors = [];
-      const payloads = [];
-      let responseIndex = 0;
       try {
-        while (nowMillis() < deadline) {
-          if (responseIndex >= responses.length) {
-            if (payloads.length) break;
-            const remaining = deadline - nowMillis();
-            const observation = await withTimeout(new Promise(resolve => waiters.push(resolve)), remaining);
-            if (typeof observation === 'symbol') break;
-            continue;
-          }
-          const response = responses[responseIndex];
-          responseIndex += 1;
-          let candidate;
-          try {
-            candidate = await withTimeout(response.json(), deadline - nowMillis());
-          } catch {
-            candidate = null;
-          }
-          if (typeof candidate === 'symbol' || nowMillis() >= deadline) break;
-          if (supportedListPayload(candidate)) {
-            payloads.push(candidate);
-            continue;
-          }
-          qualityErrors.push('network_schema_unrecognized');
-        }
+        return await drain();
       } finally {
         dispose();
       }
-      return { payload: payloads[0] || null, payloads, qualityErrors: [...new Set(qualityErrors)] };
     },
     dispose
   };
@@ -925,9 +935,11 @@ class QeeqScraper {
       await page.waitForURL(/\/car\/search\?id=/, { timeout: this.config.resultsTimeoutMs ?? 60000 });
       await page.waitForSelector(SELECTORS.group, { timeout: this.config.resultsTimeoutMs ?? 60000 });
       const sourceSearchUrl = sanitizeSourceUrl(page.url());
+      await observation.settle();
+      const qualityErrors = await expandAllResults(page, this.config, this.sleep);
       const observed = await observation.finish();
       const providerMetadata = mergeObservedProviderMetadata(observed.payloads);
-      const qualityErrors = [...observed.qualityErrors, ...await expandAllResults(page, this.config, this.sleep)];
+      qualityErrors.unshift(...observed.qualityErrors);
       const capturedAt = new Date(this.now()).toISOString();
       const extracted = await extractResults(page, scenario, this.config, providerMetadata, sourceSearchUrl, capturedAt, this.sleep);
       qualityErrors.push(...extracted.qualityErrors);
@@ -993,6 +1005,7 @@ module.exports = {
   closeBrowserResources,
   dismissPolishPopups,
   mergeObservedProviderMetadata,
+  observeListResponses,
   parseObservedListPayload,
   parseAutocompleteIdentity,
   parseReserveBusinessIdentity,

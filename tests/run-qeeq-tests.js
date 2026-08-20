@@ -2919,7 +2919,7 @@ test('provider observer combines later supported response within one bounded lif
   const { QeeqScraper } = require('../src/qeeq/scraper');
   const fake = createFakeQeeqBrowser({ responseSequence: [
     { payload: { data: { list: [], shops: [] } }, url: 'https://www.qeeq.pl/car-api/search/list?page=1' },
-    { payload: apiFixture, url: 'https://www.qeeq.pl/car-api/search/list?page=2' }
+    { payload: apiFixture, url: 'https://www.qeeq.pl/car-api/search/list?page=2', emitDelayMs: 10 }
   ] });
   const boundedConfig = task5Config({ apiObservationTimeoutMs: 1000 });
   const outcome = await new QeeqScraper(boundedConfig, {
@@ -2943,4 +2943,28 @@ test('cross-response provider merge deduplicates repeats but preserves conflicti
   assert.equal(resolveProviderForOffer(snapshot, repeated).providerName, 'SAFE PROVIDER');
   const conflicting = mergeObservedProviderMetadata([payload('SAFE_SHOP_A', 'SAFE A'), payload('SAFE_SHOP_B', 'SAFE B')]);
   assert.equal(resolveProviderForOffer(snapshot, conflicting).quality_error, 'provider_ambiguous');
+});
+
+test('provider observer ignores a supported response received after its absolute deadline', async () => {
+  const { observeListResponses } = require('../src/qeeq/scraper');
+  let nowMs = 0;
+  let responseHandler = null;
+  let detached = false;
+  const page = {
+    on(event, handler) { if (event === 'response') responseHandler = handler; },
+    off(event, handler) { if (event === 'response' && handler === responseHandler) detached = true; }
+  };
+  const response = pageNumber => ({
+    url: () => `https://www.qeeq.pl/car-api/search/list?page=${pageNumber}`,
+    request: () => ({ method: () => 'GET' }),
+    json: async () => ({ data: { list: [], shops: [] } })
+  });
+  const observation = observeListResponses(page, 100, () => nowMs);
+  nowMs = 50;
+  responseHandler(response(1));
+  nowMs = 101;
+  responseHandler(response(2));
+  const result = await observation.finish();
+  assert.equal(result.payloads.length, 1);
+  assert.equal(detached, true);
 });
