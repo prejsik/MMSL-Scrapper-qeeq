@@ -346,6 +346,40 @@ function parseObservedListPayload(payload) {
   return providerMetadata;
 }
 
+function mergeObservedProviderMetadata(payloads) {
+  const byBusinessKey = new Map();
+  for (const payload of Array.isArray(payloads) ? payloads : []) {
+    const parsed = parseObservedListPayload(payload);
+    for (const [key, candidates] of parsed) {
+      const responseCandidates = byBusinessKey.get(key) || [];
+      responseCandidates.push(Array.isArray(candidates) ? candidates : []);
+      byBusinessKey.set(key, responseCandidates);
+    }
+  }
+  const merged = new Map();
+  for (const [key, responseCandidates] of byBusinessKey) {
+    if (responseCandidates.some(candidates => candidates.length !== 1)) {
+      merged.set(key, responseCandidates.flat());
+      continue;
+    }
+    const candidates = responseCandidates.flat();
+    const ambiguous = candidates.find(candidate => candidate?.quality_error === 'provider_ambiguous');
+    if (ambiguous) {
+      merged.set(key, [ambiguous]);
+      continue;
+    }
+    const resolvedByIdentity = new Map();
+    for (const candidate of candidates) {
+      if (candidate?.quality_error) continue;
+      const signature = JSON.stringify([candidate?.providerName ?? null, String(candidate?.pickupShopId ?? '')]);
+      resolvedByIdentity.set(signature, candidate);
+    }
+    if (resolvedByIdentity.size) merged.set(key, [...resolvedByIdentity.values()]);
+    else if (candidates.length) merged.set(key, [candidates.at(-1)]);
+  }
+  return merged;
+}
+
 function resolveProviderForOffer(snapshot, providerMetadata) {
   const key = buildOfferBusinessKey(snapshot?.businessId, snapshot?.businessBid);
   if (key === null || !(providerMetadata instanceof Map)) return { quality_error: 'provider_unresolved' };
@@ -644,11 +678,12 @@ function observeListResponses(page, timeoutMs, nowMillis = Date.now) {
   return {
     async finish() {
       const qualityErrors = [];
-      let payload = null;
+      const payloads = [];
       let responseIndex = 0;
       try {
         while (nowMillis() < deadline) {
           if (responseIndex >= responses.length) {
+            if (payloads.length) break;
             const remaining = deadline - nowMillis();
             const observation = await withTimeout(new Promise(resolve => waiters.push(resolve)), remaining);
             if (typeof observation === 'symbol') break;
@@ -664,15 +699,15 @@ function observeListResponses(page, timeoutMs, nowMillis = Date.now) {
           }
           if (typeof candidate === 'symbol' || nowMillis() >= deadline) break;
           if (supportedListPayload(candidate)) {
-            payload = candidate;
-            break;
+            payloads.push(candidate);
+            continue;
           }
           qualityErrors.push('network_schema_unrecognized');
         }
       } finally {
         dispose();
       }
-      return { payload, qualityErrors: [...new Set(qualityErrors)] };
+      return { payload: payloads[0] || null, payloads, qualityErrors: [...new Set(qualityErrors)] };
     },
     dispose
   };
@@ -891,7 +926,7 @@ class QeeqScraper {
       await page.waitForSelector(SELECTORS.group, { timeout: this.config.resultsTimeoutMs ?? 60000 });
       const sourceSearchUrl = sanitizeSourceUrl(page.url());
       const observed = await observation.finish();
-      const providerMetadata = observed.payload ? parseObservedListPayload(observed.payload) : new Map();
+      const providerMetadata = mergeObservedProviderMetadata(observed.payloads);
       const qualityErrors = [...observed.qualityErrors, ...await expandAllResults(page, this.config, this.sleep)];
       const capturedAt = new Date(this.now()).toISOString();
       const extracted = await extractResults(page, scenario, this.config, providerMetadata, sourceSearchUrl, capturedAt, this.sleep);
@@ -957,6 +992,7 @@ module.exports = {
   buildOfferBusinessKey,
   closeBrowserResources,
   dismissPolishPopups,
+  mergeObservedProviderMetadata,
   parseObservedListPayload,
   parseAutocompleteIdentity,
   parseReserveBusinessIdentity,

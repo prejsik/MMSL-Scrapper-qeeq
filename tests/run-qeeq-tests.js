@@ -2912,3 +2912,35 @@ test('separate numeric Diamond row does not taint a verified public displayed to
   assert.equal(result.price_verified, true);
   assert.equal(result.conditional_price_verified, true);
 });
+
+test('provider observer combines later supported response within one bounded lifetime', async () => {
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({ responseSequence: [
+    { payload: { data: { list: [], shops: [] } }, url: 'https://www.qeeq.pl/car-api/search/list?page=1' },
+    { payload: apiFixture, url: 'https://www.qeeq.pl/car-api/search/list?page=2' }
+  ] });
+  const boundedConfig = task5Config({ apiObservationTimeoutMs: 1000 });
+  const outcome = await new QeeqScraper(boundedConfig, {
+    launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep
+  }).runScenario(task5Scenario());
+  assert.equal(outcome.status, 'success');
+  assert.equal(outcome.offers[0].provider_name, 'CARWIZ');
+  assert.equal(outcome.quality_errors.includes('provider_unresolved'), false);
+  assert.equal(fake.responseListeners, 0);
+  assert.equal(fake.clockMs <= boundedConfig.apiObservationTimeoutMs, true);
+});
+
+test('cross-response provider merge deduplicates repeats but preserves conflicting ambiguity', () => {
+  const { mergeObservedProviderMetadata, resolveProviderForOffer } = require('../src/qeeq/scraper');
+  const payload = (shopId, providerName) => ({ data: {
+    list: [{ meal_list: [{ id: 'SAFE_ID', bid: 'SAFE_BID', pickup_shop: shopId }] }],
+    shops: [{ id: shopId, name: providerName }]
+  } });
+  const snapshot = { businessId: 'SAFE_ID', businessBid: 'SAFE_BID' };
+  const repeated = mergeObservedProviderMetadata([payload('SAFE_SHOP', 'SAFE PROVIDER'), payload('SAFE_SHOP', 'SAFE PROVIDER')]);
+  assert.equal(resolveProviderForOffer(snapshot, repeated).providerName, 'SAFE PROVIDER');
+  const conflicting = mergeObservedProviderMetadata([payload('SAFE_SHOP_A', 'SAFE A'), payload('SAFE_SHOP_B', 'SAFE B')]);
+  assert.equal(resolveProviderForOffer(snapshot, conflicting).quality_error, 'provider_ambiguous');
+});
