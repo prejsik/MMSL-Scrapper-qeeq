@@ -91,6 +91,22 @@ test('rolling dates begin tomorrow in Europe Warsaw across UTC midnight', () => 
   assert.equal(scenarios[0].rentalDays, 2);
 });
 
+test('rolling dates retain date-only duration across Warsaw spring DST', () => {
+  const { expandScenarios } = require('../src/qeeq/run');
+  const scenarios = expandScenarios({ locations: ['Katowice'], startDates: [], rollingDays: 1, durationsDays: [2], pickupTime: '10:00', dropoffTime: '10:00', timeZone: 'Europe/Warsaw', maxScenarios: 7020 }, new Date('2026-03-28T10:00:00Z'));
+  assert.equal(scenarios[0].pickupDate, '2026-03-29');
+  assert.equal(scenarios[0].dropoffDate, '2026-03-31');
+  assert.equal(scenarios[0].rentalDays, 2);
+});
+
+test('rolling dates retain date-only duration across Warsaw autumn DST', () => {
+  const { expandScenarios } = require('../src/qeeq/run');
+  const scenarios = expandScenarios({ locations: ['Katowice'], startDates: [], rollingDays: 1, durationsDays: [2], pickupTime: '10:00', dropoffTime: '10:00', timeZone: 'Europe/Warsaw', maxScenarios: 7020 }, new Date('2026-10-24T10:00:00Z'));
+  assert.equal(scenarios[0].pickupDate, '2026-10-25');
+  assert.equal(scenarios[0].dropoffDate, '2026-10-27');
+  assert.equal(scenarios[0].rentalDays, 2);
+});
+
 test('scenario expansion refuses a matrix above the configured cap', () => {
   const { expandScenarios } = require('../src/qeeq/run');
   const { defaultLocationCities } = require('../src/qeeq/locations');
