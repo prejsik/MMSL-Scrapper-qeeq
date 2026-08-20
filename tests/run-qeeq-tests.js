@@ -2058,3 +2058,123 @@ test('XLSX preserves distinct root diagnostic counts after presentation redactio
   const values = rows.flat(2).filter(value => value !== null && value !== undefined).join('|');
   assert.doesNotMatch(values, /ROOT-A|ROOT-B/);
 });
+
+test('Telegram final summary includes independent statuses, counts, safe codes, and prioritized links', () => {
+  const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
+  const payload = {
+    run_status: 'partial', quality_status: 'warning', expected_checks: 9, completed_checks: 8, failed_checks: 1,
+    quality: { verified_public_offer_count: 7, unverified_offer_count: 2, quality_errors: ['price_unverified', 'ticket=SECRET'] },
+    errors: [{ code: 'navigation_timeout' }, { code: 'id:SECRET' }]
+  };
+  const text = buildFinalSummary(payload, {
+    reportUrl: 'https://example.test/report.html',
+    artifactUrl: 'https://github.com/example/actions/runs/1/artifacts/2',
+    runUrl: 'https://github.com/example/actions/runs/1'
+  });
+  assert.match(text, /Run: partial/);
+  assert.match(text, /Jakość: warning/);
+  assert.match(text, /Kontrole: 8\/9 \(nieudane: 1\)/);
+  assert.match(text, /zweryfikowane: 7, niezweryfikowane: 2/);
+  assert.match(text, /navigation_timeout/);
+  assert.match(text, /price_unverified/);
+  assert.match(text, /Raport: https:\/\/example\.test\/report\.html/);
+  assert.match(text, /Run GitHub Actions: https:\/\/github\.com\/example\/actions\/runs\/1/);
+  assert.doesNotMatch(text, /SECRET|ticket|\bid:/i);
+  assert.doesNotMatch(text, /artifacts\/2/);
+});
+
+test('Telegram summaries reject unsafe links and sanitize hostile malformed inputs deterministically', () => {
+  const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
+  const hostile = { toString: null };
+  const payload = {
+    run_status: hostile, quality_status: null, expected_checks: -4, completed_checks: Infinity, failed_checks: '2',
+    quality: { verified_public_offer_count: hostile, unverified_offer_count: -1, quality_errors: [null, 'safe_code', '::error::OWNED', 'qeeq_city_id=BUSINESS'] },
+    errors: [{ code: 'execution_failed' }, null, { code: hostile }]
+  };
+  const options = {
+    reportUrl: 'https://user:pass@example.test/report#fragment',
+    artifactUrl: 'https://example.test/artifact?ticket=SESSION',
+    runUrl: 'javascript:alert(1)'
+  };
+  const first = buildFinalSummary(payload, options);
+  const second = buildFinalSummary(payload, options);
+  assert.equal(first, second);
+  assert.match(first, /Run: unknown/);
+  assert.match(first, /Jakość: unknown/);
+  assert.match(first, /Kontrole: 0\/0 \(nieudane: 0\)/);
+  assert.match(first, /execution_failed|safe_code/);
+  assert.doesNotMatch(first, /https?:|javascript:|SESSION|BUSINESS|OWNED|::/);
+  const poisonedPayload = Object.defineProperty({}, 'run_status', { get() { throw new Error('getter executed'); } });
+  const poisonedOptions = Object.defineProperty({}, 'reportUrl', { get() { throw new Error('getter executed'); } });
+  assert.doesNotThrow(() => buildFinalSummary(poisonedPayload, poisonedOptions));
+});
+
+test('Telegram plan failure works without payload and bounds sanitized error text to 300 characters', () => {
+  const { buildPlanFailureSummary } = require('../src/qeeq/telegramSummary');
+  const hostileMessage = `invalid\u0000 matrix\u001b[31m\u202E::error:: https://user:URL-PASSWORD@example.test/path?ticket=SESSION ${'x'.repeat(400)}`;
+  const text = buildPlanFailureSummary(new Error(hostileMessage), {
+    reportUrl: 'https://example.test/report#bad',
+    artifactUrl: 'https://example.test/artifact',
+    runUrl: 'https://github.com/example/actions/runs/2'
+  });
+  assert.match(text, /^QEEQ plan failure\n/);
+  const errorLine = text.split('\n').find(line => line.startsWith('Błąd: '));
+  assert.ok(errorLine);
+  assert.ok([...errorLine.slice('Błąd: '.length)].length <= 300);
+  assert.match(errorLine, /invalid matrix/);
+  assert.doesNotMatch(text, /SESSION|URL-PASSWORD|ticket|\u001b|\u202E|::error::/);
+  assert.match(text, /Artefakt: https:\/\/example\.test\/artifact/);
+  assert.match(text, /Run GitHub Actions: https:\/\/github\.com\/example\/actions\/runs\/2/);
+  assert.doesNotThrow(() => buildPlanFailureSummary({ message: { toString: null } }, null));
+});
+
+test('Telegram summary argument parser has exact modes and rejects ambiguous arguments', () => {
+  const summary = require('../src/qeeq/telegramSummary');
+  assert.deepEqual(Object.keys(summary).sort(), ['buildFinalSummary', 'buildPlanFailureSummary', 'parseSummaryArgs']);
+  assert.deepEqual(summary.parseSummaryArgs(['--help']), { help: true });
+  assert.deepEqual(summary.parseSummaryArgs(['--mode=final-summary', '--input=result.json', '--report-url=https://example.test/report']), {
+    mode: 'final-summary', input: 'result.json', reportUrl: 'https://example.test/report'
+  });
+  assert.deepEqual(summary.parseSummaryArgs(['--mode=plan-failure', '--error=invalid matrix', '--run-url=https://example.test/run']), {
+    mode: 'plan-failure', error: 'invalid matrix', runUrl: 'https://example.test/run'
+  });
+  for (const argv of [
+    [], ['--help', '--mode=final-summary'], ['--wat=yes'], ['positional'], ['--mode'],
+    ['--mode=other'], ['--mode=final-summary'], ['--mode=plan-failure'],
+    ['--mode=final-summary', '--input=a', '--input=b'],
+    ['--mode=final-summary', '--input=a', '--error=bad'],
+    ['--mode=plan-failure', '--error=bad', '--input=a']
+  ]) assert.throws(() => summary.parseSummaryArgs(argv));
+});
+
+test('Telegram summary CLI prints exactly one sanitized message and plan failure reads no payload', () => {
+  const { spawnSync } = require('node:child_process');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const modulePath = path.resolve(__dirname, '../src/qeeq/telegramSummary.js');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-telegram-'));
+  const input = path.join(directory, 'canonical.json');
+  try {
+    fs.writeFileSync(input, JSON.stringify({ run_status: 'success', quality_status: 'pass', expected_checks: 1, completed_checks: 1, failed_checks: 0, quality: { verified_public_offer_count: 2, unverified_offer_count: 0 } }));
+    const final = spawnSync(process.execPath, [modulePath, '--mode=final-summary', `--input=${input}`, '--artifact-url=https://example.test/artifact'], { encoding: 'utf8' });
+    assert.equal(final.status, 0, final.stderr);
+    assert.equal(final.stderr, '');
+    assert.equal(final.stdout, `${final.stdout.trimEnd()}\n`);
+    assert.equal((final.stdout.match(/QEEQ scrape summary/g) || []).length, 1);
+
+    fs.unlinkSync(input);
+    const plan = spawnSync(process.execPath, [modulePath, '--mode=plan-failure', '--error=invalid%0Amatrix', '--run-url=https://example.test/run'], { encoding: 'utf8' });
+    assert.equal(plan.status, 0, plan.stderr);
+    assert.equal(plan.stderr, '');
+    assert.equal((plan.stdout.match(/QEEQ plan failure/g) || []).length, 1);
+    assert.equal(plan.stdout, `${plan.stdout.trimEnd()}\n`);
+
+    const help = spawnSync(process.execPath, [modulePath, '--help'], { encoding: 'utf8' });
+    assert.equal(help.status, 0);
+    assert.equal((help.stdout.match(/Usage:/g) || []).length, 1);
+    assert.equal(spawnSync(process.execPath, [modulePath, '--wat=yes'], { encoding: 'utf8' }).status, 1);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
