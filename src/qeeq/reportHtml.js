@@ -9,6 +9,18 @@ function arrayOf(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function isPlainObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function safeDiagnostic(value) {
+  const text = typeof value === 'string' ? value : display(value);
+  return text.replace(/(^|[?&#,;\s])(id|clid|_vv_|fpt|ticket|ts|qeeq_fpt)\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|[^&?#,;\s<>]+)/gi,
+    (_, separator, field) => `${separator}${field}=[redacted]`);
+}
+
 function escapeHtml(value) {
   if (value === null || value === undefined) return '';
   return String(value).replace(/[&<>"'=\u2028\u2029]/g, character => ({
@@ -54,7 +66,7 @@ function topRow(offer, position, scenario) {
   const pickupDate = display(typeof scenario.pickup_at === 'string' ? scenario.pickup_at.slice(0, 10) : '', '');
   return `<tr class="filterable-offer" data-airport="${escapeHtml(airport)}" data-pickup-date="${escapeHtml(pickupDate)}" data-duration="${escapeHtml(display(scenario.rental_days, ''))}" data-transmission="${escapeHtml(display(offer.transmission, ''))}" data-provider="${escapeHtml(display(offer.provider_name, ''))}" data-status="${escapeHtml(display(scenario.status, ''))}">
     <td>${position}</td><td>${escapeHtml(display(scenario.iata || scenario.airport_key))}</td>
-    <td>${escapeHtml(display((scenario.pickup_at || '').slice(0, 10)))}</td>
+    <td>${escapeHtml(display(pickupDate))}</td>
     <td>${escapeHtml(display(scenario.rental_days))}</td><td>${escapeHtml(display(offer.provider_name))}</td>
     <td>${escapeHtml(display(offer.vehicle_name))}</td><td>${priceCell(offer.total_price, offer.currency)}</td>
     <td>${priceCell(offer.daily_price, offer.currency)}</td><td>${safeSourceLink(offer.source_search_url)}</td>
@@ -105,19 +117,19 @@ function buildHtmlReport(payload = {}) {
   const root = payload && typeof payload === 'object' ? payload : {};
   const scenarios = arrayOf(root.scenarios).filter(scenario => scenario && typeof scenario === 'object');
   const allOffers = scenarios.flatMap(scenario => arrayOf(scenario.offers).filter(offer => offer && typeof offer === 'object'));
-  const topRows = scenarios.flatMap(scenario => rankVerifiedPublicOffers(arrayOf(scenario.offers)).slice(0, 3).map((offer, index) => topRow(offer, index + 1, scenario)));
+  const topRows = scenarios.flatMap(scenario => rankVerifiedPublicOffers(arrayOf(scenario.offers).filter(isPlainObject)).slice(0, 3).map((offer, index) => topRow(offer, index + 1, scenario)));
   const qualityWarnings = unique([
     ...arrayOf(root.quality?.quality_errors),
     ...scenarios.flatMap(scenario => arrayOf(scenario.quality_errors)),
     ...arrayOf(root.errors).map(error => error?.code)
-  ]);
+  ].map(safeDiagnostic));
   const expected = Number.isInteger(root.expected_checks) && root.expected_checks >= 0 ? root.expected_checks : scenarios.length;
   const completed = Number.isInteger(root.completed_checks) && root.completed_checks >= 0 ? root.completed_checks : scenarios.filter(scenario => scenario.status === 'success').length;
   const failed = Number.isInteger(root.failed_checks) && root.failed_checks >= 0 ? root.failed_checks : Math.max(expected - completed, 0);
   const needsWarning = root.run_status !== 'success' || root.quality_status !== 'pass';
 
   const styles = `:root{color-scheme:light;font-family:system-ui,sans-serif;color:#172033;background:#f5f7fb}body{margin:0}main{max-width:1440px;margin:auto;padding:24px}.banner{position:sticky;top:0;z-index:5;padding:16px;border-radius:10px;background:#e7f7ed;border:1px solid #7bc693}.banner.warning{background:#fff3cd;border-color:#e4bd51}.counts,.filters{display:flex;gap:12px;flex-wrap:wrap}.counts span,.filters label{background:white;padding:10px;border-radius:8px}.filters{margin:18px 0}.filters label{display:grid;gap:5px}select{min-width:140px;padding:6px}section{margin:24px 0}article{background:white;border:1px solid #dce2ed;border-radius:10px;margin:14px 0;padding:16px}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;background:white}th,td{border-bottom:1px solid #e2e7ef;padding:9px;text-align:left;white-space:nowrap}th{background:#eef2f8}.price-state{display:block;color:#596579;font-size:.8rem}.warnings{overflow-wrap:anywhere}.empty{padding:20px;background:white;border-radius:10px}[hidden]{display:none!important}`;
-  const script = `(()=>{const ids=['airport','pickup-date','duration','transmission','provider','status'];const controls=ids.map(id=>document.getElementById('filter-'+id));const key=id=>id==='pickup-date'?'pickupDate':id;const rowMatches=(row,id,value)=>!value||row.dataset[key(id)]===value;const articleMatches=(article,id,value)=>{if(!value)return true;if(id==='provider'||id==='transmission')return Array.from(article.querySelectorAll('tr.filterable-offer')).some(row=>rowMatches(row,id,value));return article.dataset[key(id)]===value};const apply=()=>{document.querySelectorAll('article.scenario').forEach(article=>{article.hidden=!controls.every((control,index)=>articleMatches(article,ids[index],control.value))});document.querySelectorAll('tr.filterable-offer').forEach(row=>{row.hidden=!controls.every((control,index)=>rowMatches(row,ids[index],control.value))})};controls.forEach(control=>control.addEventListener('change',apply))})();`;
+  const script = `(()=>{const ids=['airport','pickup-date','duration','transmission','provider','status'];const scenarioIds=['airport','pickup-date','duration','status'];const offerIds=['transmission','provider'];const controls=Object.fromEntries(ids.map(id=>[id,document.getElementById('filter-'+id)]));const key=id=>id==='pickup-date'?'pickupDate':id;const matches=(element,id)=>!controls[id].value||element.dataset[key(id)]===controls[id].value;const articleMatches=article=>scenarioIds.every(id=>matches(article,id))&&(!offerIds.some(id=>controls[id].value)||Array.from(article.querySelectorAll('tr.filterable-offer')).some(row=>offerIds.every(id=>matches(row,id))));const apply=()=>{document.querySelectorAll('article.scenario').forEach(article=>{article.hidden=!articleMatches(article)});document.querySelectorAll('tr.filterable-offer').forEach(row=>{row.hidden=!ids.every(id=>matches(row,id))})};Object.values(controls).forEach(control=>control.addEventListener('change',apply))})();`;
   const csp = `default-src 'none'; style-src ${hashDirective(styles)}; script-src ${hashDirective(script)}; img-src data:; connect-src 'none'; font-src 'none'; object-src 'none'; media-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'`;
   const warningText = needsWarning ? 'Raport częściowy lub z ostrzeżeniami — dane wymagają weryfikacji.' : 'Raport kompletny — jakość danych zaliczona.';
 

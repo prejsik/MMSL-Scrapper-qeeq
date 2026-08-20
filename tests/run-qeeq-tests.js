@@ -1750,3 +1750,65 @@ test('HTML module exposes exact interfaces and CLI writes atomically without inp
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('HTML redacts forbidden session diagnostics but preserves normal quality codes', () => {
+  const { buildHtmlReport } = require('../src/qeeq/reportHtml');
+  const secrets = ['SECRET-ID', 'SECRET-CLID', 'SECRET-VV', 'SECRET-FPT', 'SECRET-TICKET', 'SECRET-TS', 'SECRET-QEEQ'];
+  const html = buildHtmlReport({
+    run_status: 'partial', quality_status: 'warning',
+    quality: { quality_errors: [
+      `id=${secrets[0]}`,
+      `CLID: ${secrets[1]}`,
+      `?_vv_=${secrets[2]}&safe=1`,
+      `&fpt:${secrets[3]}`,
+      `ticket = '${secrets[4]}'`,
+      `ts:"${secrets[5]}"`,
+      `qeeq_fpt=${secrets[6]}`,
+      'location_id_drift'
+    ] },
+    scenarios: []
+  });
+  for (const secret of secrets) assert.doesNotMatch(html, new RegExp(secret));
+  assert.match(html, /location_id_drift/);
+  assert.match(html, /\[redacted\]/);
+});
+
+test('HTML inline filters require one offer row to match provider and transmission together', () => {
+  const vm = require('node:vm');
+  const { buildHtmlReport } = require('../src/qeeq/reportHtml');
+  const html = buildHtmlReport({ scenarios: [{ key: 'x', status: 'success', iata: 'KTW', pickup_at: '2026-09-19T10:00:00', rental_days: 2, offers: [
+    { provider_name: 'A', transmission: 'Automatic', total_price: 100, price_tier: 'public', price_verified: true },
+    { provider_name: 'B', transmission: 'Manual', total_price: 110, price_tier: 'public', price_verified: true }
+  ] }] });
+  const script = html.match(/<script[^>]*>([\s\S]*?)<\/script>/)[1];
+  const ids = ['airport', 'pickup-date', 'duration', 'transmission', 'provider', 'status'];
+  const controls = Object.fromEntries(ids.map(id => [id, { value: '', addEventListener(event, callback) { this.callback = callback; } }]));
+  const rows = [
+    { dataset: { airport: 'KTW', pickupDate: '2026-09-19', duration: '2', transmission: 'Automatic', provider: 'A', status: 'success' }, hidden: false },
+    { dataset: { airport: 'KTW', pickupDate: '2026-09-19', duration: '2', transmission: 'Manual', provider: 'B', status: 'success' }, hidden: false }
+  ];
+  const article = { dataset: { airport: 'KTW', pickupDate: '2026-09-19', duration: '2', status: 'success' }, hidden: false, querySelectorAll() { return rows; } };
+  const emptyArticle = { dataset: { airport: 'KTW', pickupDate: '2026-09-19', duration: '2', status: 'failure' }, hidden: false, querySelectorAll() { return []; } };
+  const document = {
+    getElementById(id) { return controls[id.replace('filter-', '')]; },
+    querySelectorAll(selector) { return selector === 'article.scenario' ? [article, emptyArticle] : rows; }
+  };
+  vm.runInNewContext(script, { document });
+  controls.provider.value = 'A';
+  controls.transmission.value = 'Manual';
+  controls.provider.callback();
+  assert.equal(article.hidden, true);
+  assert.equal(emptyArticle.hidden, true);
+  controls.transmission.value = 'Automatic';
+  controls.provider.callback();
+  assert.equal(article.hidden, false);
+  assert.deepEqual(rows.map(row => row.hidden), [false, true]);
+});
+
+test('HTML ignores malformed ranked offers and non-string pickup timestamps', () => {
+  const { buildHtmlReport } = require('../src/qeeq/reportHtml');
+  const payload = { scenarios: [{ key: 'x', pickup_at: { slice: 'not a function' }, offers: [null, { provider_name: 'A', total_price: 100, price_tier: 'public', price_verified: true }] }] };
+  assert.doesNotThrow(() => buildHtmlReport(payload));
+  assert.equal(buildHtmlReport(payload), buildHtmlReport(payload));
+  assert.match(buildHtmlReport(payload), /<td>—<\/td>/);
+});
