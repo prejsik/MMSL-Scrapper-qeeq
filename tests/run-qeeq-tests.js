@@ -1812,3 +1812,136 @@ test('HTML ignores malformed ranked offers and non-string pickup timestamps', ()
   assert.equal(buildHtmlReport(payload), buildHtmlReport(payload));
   assert.match(buildHtmlReport(payload), /<td>—<\/td>/);
 });
+
+test('XLSX contains seven usable sheets with typed verified and conditional price fields', async () => {
+  const { buildDetailRows, buildWorkbook } = require('../src/qeeq/reportXlsx');
+  const payload = {
+    run_status: 'partial', quality_status: 'warning', expected_checks: 2, completed_checks: 1, failed_checks: 1,
+    quality: { verified_public_offer_count: 4, unverified_offer_count: 1, quality_errors: ['price_unverified'] },
+    errors: [{ code: 'execution_failed', scenario_key: 'waw:2026-09-20:2' }],
+    scenarios: [
+      { key: 'ktw:2026-09-19:2', status: 'success', requested_city: 'Katowice', airport_key: 'katowice-pyrzowice', iata: 'KTW', pickup_at: '2026-09-19T10:00:00', dropoff_at: '2026-09-21T10:00:00', rental_days: 2, quality_errors: ['price_unverified'], offers: [
+        { provider_name: 'CHEAPEST', vehicle_name: 'A', transmission: 'Automatic', provider_rating: 8.7, provider_rating_count: 120, deposit_amount: 500, deposit_currency: 'PLN', total_price: 100, daily_price: 50, currency: 'PLN', price_tier: 'public', price_verified: true },
+        { provider_name: 'TIE FIRST', vehicle_name: 'B', total_price: 119, daily_price: 59.5, currency: 'PLN', price_tier: 'public', price_verified: true },
+        { provider_name: 'TIE SECOND', vehicle_name: 'C', total_price: 119, currency: 'PLN', price_tier: 'public', price_verified: true },
+        { provider_name: 'FOURTH', vehicle_name: 'D', total_price: 120, currency: 'PLN', price_tier: 'public', price_verified: true },
+        { provider_name: 'CARWIZ', vehicle_name: 'Skoda Fabia', conditional_offer_total: 106, conditional_offer_daily: 53, conditional_offer_type: 'newcomer_coupon', conditional_member_total: 98, conditional_member_daily: 49, currency: 'PLN', price_tier: 'conditional', price_verified: false, conditional_price_verified: true }
+      ] },
+      { key: 'waw:2026-09-20:2', status: 'failure', requested_city: 'Warszawa', airport_key: 'warsaw-chopin', iata: 'WAW', pickup_at: '2026-09-20T10:00:00', rental_days: 2, errors: [{ code: 'execution_failed' }], offers: [] }
+    ]
+  };
+  const detailRows = buildDetailRows(payload);
+  assert.equal(detailRows.length, 5);
+  assert.equal(detailRows[0]['Public total'], 100);
+  assert.equal(detailRows[4]['Conditional offer total'], 106);
+  assert.equal(detailRows[4]['Diamond/member total'], 98);
+
+  const workbook = await buildWorkbook(payload);
+  assert.deepEqual(workbook.worksheets.map(sheet => sheet.name), ['Overview', 'Top 3', 'By airport', 'By duration', 'Providers', 'Details', 'Data quality']);
+  for (const sheet of workbook.worksheets) {
+    assert.equal(sheet.views[0].state, 'frozen');
+    assert.equal(sheet.views[0].ySplit, 1);
+    assert.ok(sheet.autoFilter);
+    assert.ok(sheet.getColumn(1).width >= 10);
+  }
+
+  const details = workbook.getWorksheet('Details');
+  const headers = details.getRow(1).values;
+  for (const header of ['Public total', 'Conditional offer total', 'Diamond/member total', 'Provider rating', 'Deposit amount']) assert.equal(headers.includes(header), true);
+  const column = header => headers.indexOf(header);
+  assert.equal(typeof details.getRow(2).getCell(column('Public total')).value, 'number');
+  assert.equal(typeof details.getRow(2).getCell(column('Provider rating')).value, 'number');
+  assert.equal(typeof details.getRow(2).getCell(column('Deposit amount')).value, 'number');
+  assert.match(details.getRow(2).getCell(column('Public total')).numFmt, /PLN/);
+  assert.ok(details.getRow(2).getCell(column('Pickup at')).value instanceof Date);
+  assert.equal(details.getRow(2).getCell(column('Pickup at')).value.toISOString(), '2026-09-19T10:00:00.000Z');
+  assert.equal(details.getRow(6).getCell(column('Conditional offer total')).value, 106);
+
+  const top3Values = workbook.getWorksheet('Top 3').getSheetValues().flat(2);
+  assert.deepEqual(top3Values.filter(value => ['CHEAPEST', 'TIE FIRST', 'TIE SECOND', 'FOURTH', 'CARWIZ'].includes(value)), ['CHEAPEST', 'TIE FIRST', 'TIE SECOND']);
+  assert.equal(workbook.getWorksheet('By airport').getSheetValues().flat(2).includes('KTW'), true);
+  assert.equal(workbook.getWorksheet('By duration').getSheetValues().flat(2).includes(2), true);
+  assert.equal(workbook.getWorksheet('Providers').getSheetValues().flat(2).includes('CARWIZ'), true);
+
+  const qualityValues = workbook.getWorksheet('Data quality').getSheetValues().flat(2);
+  assert.equal(qualityValues.includes('price_unverified'), true);
+  assert.equal(qualityValues.includes('execution_failed'), true);
+  assert.equal(qualityValues.includes('ktw:2026-09-19:2'), true);
+  assert.equal(qualityValues.includes('waw:2026-09-20:2'), true);
+  const qualityRows = workbook.getWorksheet('Data quality').getSheetValues().slice(2);
+  assert.equal(qualityRows.find(row => row.includes('price_unverified'))[3], 1);
+  assert.equal(qualityRows.find(row => row.includes('execution_failed'))[3], 1);
+  assert.equal(workbook.getWorksheet('Overview').getCell('B3').fill.fgColor.argb, 'FFFFC000');
+});
+
+test('XLSX safely ignores malformed objects and never projects forbidden identifiers or diagnostics', async () => {
+  const { buildDetailRows, buildWorkbook } = require('../src/qeeq/reportXlsx');
+  const secret = 'SESSION-SECRET-123';
+  const payload = {
+    run_status: 'failure', quality_status: 'fail', quality: { quality_errors: [`clid=${secret}`, 'location_id_drift'] },
+    errors: [{ code: `ticket:${secret}`, scenario_key: `id=${secret}` }],
+    scenarios: [null, [], { key: 'safe-key', pickup_at: '2026-02-31T10:00:00', qeeq_city_id: secret, qeeq_landmark_id: secret, offers: [null, [], {
+      provider_name: `Authorization: Bearer ${secret}`, vehicle_name: 'Safe', total_price: Infinity, price_tier: 'public', price_verified: true,
+      id: secret, bid: secret, clid: secret, authorization: secret, cookie: secret, raw_html: secret
+    }], quality_errors: [`fpt=${secret}`, 'normal_code'], errors: { bad: true } }]
+  };
+  assert.equal(buildDetailRows(payload)[0]['Pickup at'], null);
+  const workbook = await buildWorkbook(payload);
+  const allValues = workbook.worksheets.flatMap(sheet => sheet.getSheetValues().flat(3)).filter(value => value !== undefined && value !== null).join('|');
+  assert.doesNotMatch(allValues, new RegExp(secret));
+  assert.doesNotMatch(allValues, /qeeq_city_id|qeeq_landmark_id|authorization|raw_html/i);
+  assert.match(allValues, /location_id_drift|normal_code/);
+  assert.equal(workbook.getWorksheet('Top 3').rowCount, 1);
+});
+
+test('XLSX exposes exact interfaces and CLI writes a same-directory atomic file without collisions', async () => {
+  const { spawnSync } = require('node:child_process');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const ExcelJS = require('exceljs');
+  const modulePath = path.resolve(__dirname, '../src/qeeq/reportXlsx.js');
+  const report = require('../src/qeeq/reportXlsx');
+  assert.deepEqual(Object.keys(report).sort(), ['buildDetailRows', 'buildWorkbook', 'generateWorkbookFromFile']);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-xlsx-'));
+  const input = path.join(directory, 'input.json');
+  const output = path.join(directory, 'nested', 'report.xlsx');
+  try {
+    fs.writeFileSync(input, JSON.stringify({ run_status: 'success', quality_status: 'pass', scenarios: [] }));
+    const help = spawnSync(process.execPath, [modulePath, '--help'], { cwd: directory, encoding: 'utf8' });
+    assert.equal(help.status, 0);
+    assert.match(help.stdout, /Usage:/);
+    assert.deepEqual(fs.readdirSync(directory), ['input.json']);
+
+    const made = spawnSync(process.execPath, [modulePath, input, output], { encoding: 'utf8' });
+    assert.equal(made.status, 0);
+    const loaded = new ExcelJS.Workbook();
+    await loaded.xlsx.readFile(output);
+    assert.deepEqual(loaded.worksheets.map(sheet => sheet.name), ['Overview', 'Top 3', 'By airport', 'By duration', 'Providers', 'Details', 'Data quality']);
+    assert.deepEqual(fs.readdirSync(path.dirname(output)), ['report.xlsx']);
+
+    fs.writeFileSync(input, JSON.stringify({ run_status: 'partial', quality_status: 'warning', scenarios: [] }));
+    const replaced = spawnSync(process.execPath, [modulePath, input, output], { encoding: 'utf8' });
+    assert.equal(replaced.status, 0);
+    const replacement = new ExcelJS.Workbook();
+    await replacement.xlsx.readFile(output);
+    assert.equal(replacement.getWorksheet('Overview').getCell('B2').value, 'partial');
+
+    fs.writeFileSync(output, 'OLD XLSX');
+    const hook = path.join(path.dirname(output), 'rename-hook.cjs');
+    fs.writeFileSync(hook, `require('node:fs').renameSync=()=>{throw new Error('injected rename failure')};`);
+    const failedWrite = spawnSync(process.execPath, ['-r', hook, modulePath, input, output], { encoding: 'utf8' });
+    assert.equal(failedWrite.status, 1);
+    assert.equal(fs.readFileSync(output, 'utf8'), 'OLD XLSX');
+    assert.deepEqual(fs.readdirSync(path.dirname(output)).filter(name => name.endsWith('.tmp')), []);
+    fs.unlinkSync(hook);
+
+    const before = fs.readFileSync(input, 'utf8');
+    const collision = spawnSync(process.execPath, [modulePath, input, input], { encoding: 'utf8' });
+    assert.equal(collision.status, 1);
+    assert.equal(fs.readFileSync(input, 'utf8'), before);
+    assert.equal(spawnSync(process.execPath, [modulePath, input], { encoding: 'utf8' }).status, 1);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
