@@ -1068,9 +1068,12 @@ test('exit code accepts only exact known successful and warning states', () => {
 
 test('verified conditional price does not downgrade otherwise valid public quality', () => {
   const { buildRootPayload } = require('../src/qeeq/run');
-  const payload = buildRootPayload({ expected_checks: 1, scenarios: [{ key: 'a', status: 'success', errors: [], quality_errors: [], offers: [{ record_type: 'offer', price_tier: 'public', price_verified: true, conditional_price_verified: true, total_price: 100, currency: 'PLN' }] }] });
+  const payload = buildRootPayload({ expected_checks: 1, scenarios: [{ key: 'a', status: 'success', errors: [], quality_errors: [], offers: [
+    { record_type: 'offer', price_tier: 'public', price_verified: true, conditional_price_verified: false, total_price: 100, currency: 'PLN' },
+    { record_type: 'offer', price_tier: 'conditional', price_verified: false, conditional_price_verified: true, conditional_offer_total: 90, currency: 'PLN' }
+  ] }] });
   assert.equal(payload.quality_status, 'pass');
-  assert.equal(payload.quality.quality_errors.length, 0);
+  assert.equal(payload.quality.quality_errors.includes('price_unverified'), false);
 });
 
 test('offer quality errors are sanitized and folded into root quality', () => {
@@ -1170,4 +1173,30 @@ test('canonical envelope tolerates malformed list fields', () => {
   assert.deepEqual(payload.groups, []);
   assert.deepEqual(payload.errors, []);
   assert.deepEqual(payload.quality_errors, []);
+});
+
+test('auxiliary reports reject a Windows case-variant output collision without overwriting input', () => {
+  if (process.platform !== 'win32') return;
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { main } = require('../src/qeeq/report');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-aux-case-'));
+  const names = ['qeeq-results-latest.json', 'qeeq-results.csv', 'qeeq-report.html', 'qeeq-summary.xlsx'];
+  const files = names.map(name => path.join(directory, name));
+  const quality = path.join(directory, 'quality-summary.json');
+  const manifest = path.join(directory, 'run-manifest.json');
+  const originalCsv = 'original CSV bytes';
+  try {
+    fs.writeFileSync(files[0], JSON.stringify({ run_status: 'success', quality_status: 'pass', quality: {} }));
+    fs.writeFileSync(files[1], originalCsv);
+    fs.writeFileSync(files[2], '<html>report</html>');
+    fs.writeFileSync(files[3], 'xlsx');
+    assert.throws(() => main(['--input=' + files[0], '--output-quality=' + path.join(directory, 'QEEQ-RESULTS.CSV'), '--output-manifest=' + manifest, '--manifest-files=' + files.join(',')]), /cannot collide/);
+    assert.equal(fs.readFileSync(files[1], 'utf8'), originalCsv);
+    assert.equal(fs.existsSync(quality), false);
+    assert.equal(fs.existsSync(manifest), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

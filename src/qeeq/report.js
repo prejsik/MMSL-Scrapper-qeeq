@@ -93,6 +93,18 @@ function descriptor(filePath, outputDir) {
   };
 }
 
+function pathIdentity(filePath) {
+  const absolute = path.resolve(filePath);
+  let canonical;
+  try {
+    canonical = fs.realpathSync.native(absolute);
+  } catch {
+    const parent = fs.realpathSync.native(path.dirname(absolute));
+    canonical = path.join(parent, path.basename(absolute));
+  }
+  return process.platform === 'win32' ? canonical.toLocaleLowerCase('en-US') : canonical;
+}
+
 function writeAtomicJson(outputPath, value) {
   const directory = path.dirname(outputPath);
   ensureDir(directory);
@@ -169,12 +181,17 @@ function main(argv = process.argv.slice(2)) {
     || fileNames.some(name => !AUX_MANIFEST_FILES.includes(name))) {
     throw new Error('manifest-files must contain the exact QEEQ JSON, CSV, HTML, and XLSX files');
   }
-  if (path.dirname(qualityPath) !== outputDir || files.some(file => path.dirname(file) !== outputDir)) {
+  const outputDirIdentity = pathIdentity(outputDir);
+  if (pathIdentity(path.dirname(qualityPath)) !== outputDirIdentity || files.some(file => pathIdentity(path.dirname(file)) !== outputDirIdentity)) {
     throw new Error('All manifest inputs and outputs must use the common output directory');
   }
   const jsonMember = files.find(file => path.basename(file) === 'qeeq-results-latest.json');
-  if (inputPath !== jsonMember) throw new Error('input must exactly match the JSON manifest member');
-  if (qualityPath === manifestPath || files.includes(qualityPath) || files.includes(manifestPath)) {
+  const inputIdentity = pathIdentity(inputPath);
+  const fileIdentities = files.map(pathIdentity);
+  const qualityIdentity = pathIdentity(qualityPath);
+  const manifestIdentity = pathIdentity(manifestPath);
+  if (inputIdentity !== pathIdentity(jsonMember)) throw new Error('input must exactly match the JSON manifest member');
+  if (qualityIdentity === manifestIdentity || fileIdentities.includes(qualityIdentity) || fileIdentities.includes(manifestIdentity)) {
     throw new Error('Auxiliary report outputs cannot collide with manifest inputs or each other');
   }
   for (const file of files) {
@@ -205,6 +222,7 @@ module.exports = {
   main,
   printResultsTable,
   printSummary,
+  pathIdentity,
   writeAtomicJson,
   writeAuxiliaryReports,
   writeCsvReport
