@@ -7,9 +7,17 @@ const HAS_BIDI_CONTROL = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
 const FORBIDDEN_VALUE = /\b(?:id|bid|clid|_vv_|fpt|ticket|ts|qeeq_fpt|qeeq_city_id|qeeq_landmark_id)\b\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|[^\s&#,;<>]+)/gi;
 const FORBIDDEN_HEADER = /\b(?:cookie|authorization)\s*(?:=|:)\s*[^\r\n]*/gi;
 const BEARER_VALUE = /\bbearer\s+(?:"[^"]*"|'[^']*'|[^\s,;<>]+)/gi;
-const FORBIDDEN_QUERY_KEYS = new Set([
-  'id', 'bid', 'clid', '_vv_', 'fpt', 'ticket', 'ts', 'qeeq_fpt',
-  'qeeq_city_id', 'qeeq_landmark_id', 'session', 'session_id', 'token', 'auth', 'cookie'
+const KNOWN_DIAGNOSTIC_CODES = new Set([
+  'browser_close_failed', 'chunk_failed', 'chunk_truncated', 'context_close_failed',
+  'discount_type_mismatch', 'empty_result', 'execution_failed', 'group_expansion_timeout',
+  'load_more_limit_reached', 'load_more_stalled', 'location_data_type_mismatch',
+  'location_iata_mismatch', 'location_id_drift', 'location_id_missing',
+  'location_label_mismatch', 'location_match_ambiguous', 'location_match_duplicate',
+  'location_match_missing', 'location_type_mismatch', 'missing_chunk_scenario',
+  'navigation_timeout', 'network_schema_unrecognized', 'offer_limit_reached',
+  'price_unverified', 'provider_ambiguous', 'provider_unresolved', 'quality_warning',
+  'results_timeout', 'scenario_failed', 'search_parameter_mismatch', 'session_expired',
+  'transient_network', 'unexpected_currency', 'vehicle_group_limit_reached'
 ]);
 
 function objectOrEmpty(value) {
@@ -74,8 +82,7 @@ function safeCodes(values) {
   try {
     const codes = arrayOf(values)
       .map(value => typeof value === 'string' ? value : '')
-      .filter(value => /^[a-z][a-z0-9_-]{0,63}$/i.test(value))
-      .filter(value => !FORBIDDEN_QUERY_KEYS.has(value.toLocaleLowerCase('en-US')));
+      .filter(value => KNOWN_DIAGNOSTIC_CODES.has(value));
     return [...new Set(codes)].sort().slice(0, 5);
   } catch {
     return [];
@@ -86,10 +93,7 @@ function safeHttpsUrl(value) {
   if (typeof value !== 'string' || HAS_CONTROL_CHARACTER.test(value) || HAS_BIDI_CONTROL.test(value)) return null;
   try {
     const url = new URL(value);
-    if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || url.hash) return null;
-    for (const key of url.searchParams.keys()) {
-      if (FORBIDDEN_QUERY_KEYS.has(key.toLocaleLowerCase('en-US'))) return null;
-    }
+    if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || url.hash || url.search) return null;
     return url.toString();
   } catch {
     return null;
@@ -166,6 +170,9 @@ function parseSummaryArgs(argv) {
   } else {
     if (!parsed.error) throw new Error('Missing required option: --error');
     if (parsed.input !== undefined) throw new Error('--input is only valid in final-summary mode');
+    if (parsed.reportUrl !== undefined || parsed.artifactUrl !== undefined) {
+      throw new Error('plan-failure mode accepts only --error and --run-url');
+    }
   }
   return parsed;
 }

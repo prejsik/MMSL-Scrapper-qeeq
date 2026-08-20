@@ -2109,6 +2109,53 @@ test('Telegram summaries reject unsafe links and sanitize hostile malformed inpu
   assert.doesNotThrow(() => buildFinalSummary(poisonedPayload, poisonedOptions));
 });
 
+test('Telegram links reject every query string and retain clean HTTPS fallback priority', () => {
+  const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
+  const payload = { run_status: 'success', quality_status: 'pass', quality: {} };
+  const artifactFallback = buildFinalSummary(payload, {
+    reportUrl: 'https://pages.example.test/report?download=SESSION-SECRET',
+    artifactUrl: 'https://github.com/example/actions/artifacts/2',
+    runUrl: 'https://github.com/example/actions/runs/1'
+  });
+  assert.doesNotMatch(artifactFallback, /SESSION-SECRET|pages\.example/);
+  assert.match(artifactFallback, /Artefakt: https:\/\/github\.com\/example\/actions\/artifacts\/2/);
+  assert.match(artifactFallback, /Run GitHub Actions: https:\/\/github\.com\/example\/actions\/runs\/1/);
+
+  const runFallback = buildFinalSummary(payload, {
+    reportUrl: 'https://pages.example.test/report#fragment',
+    artifactUrl: 'https://user:password@example.test/artifact',
+    runUrl: 'https://github.com/example/actions/runs/1'
+  });
+  assert.doesNotMatch(runFallback, /pages\.example|password|Artefakt:/);
+  assert.match(runFallback, /Run GitHub Actions: https:\/\/github\.com\/example\/actions\/runs\/1/);
+
+  const rejectedControls = buildFinalSummary(payload, {
+    reportUrl: 'https://example.test/re\u0001port',
+    artifactUrl: 'https://example.test/art\u202Eifact'
+  });
+  assert.doesNotMatch(rejectedControls, /https:\/\//);
+});
+
+test('Telegram diagnostic codes use a closed project allowlist and reject token-shaped values', () => {
+  const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
+  const secrets = [
+    'ghp_abcdefghijklmnopqrstuvwxyz1234567890',
+    'github_pat_11AA_secret_token_value',
+    'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature',
+    'AKIAIOSFODNN7EXAMPLE',
+    'arbitrary_token_value'
+  ];
+  const text = buildFinalSummary({
+    run_status: 'partial', quality_status: 'warning',
+    errors: [{ code: 'execution_failed' }, { code: 'navigation_timeout' }, ...secrets.map(code => ({ code }))],
+    quality: { quality_errors: ['price_unverified', 'empty_result', 'location_id_drift', ...secrets] }
+  });
+  for (const code of ['execution_failed', 'navigation_timeout', 'price_unverified', 'empty_result', 'location_id_drift']) {
+    assert.match(text, new RegExp(code));
+  }
+  for (const secret of secrets) assert.doesNotMatch(text, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
 test('Telegram plan failure works without payload and bounds sanitized error text to 300 characters', () => {
   const { buildPlanFailureSummary } = require('../src/qeeq/telegramSummary');
   const hostileMessage = `invalid\u0000 matrix\u001b[31m\u202E::error:: https://user:URL-PASSWORD@example.test/path?ticket=SESSION ${'x'.repeat(400)}`;
@@ -2143,7 +2190,9 @@ test('Telegram summary argument parser has exact modes and rejects ambiguous arg
     ['--mode=other'], ['--mode=final-summary'], ['--mode=plan-failure'],
     ['--mode=final-summary', '--input=a', '--input=b'],
     ['--mode=final-summary', '--input=a', '--error=bad'],
-    ['--mode=plan-failure', '--error=bad', '--input=a']
+    ['--mode=plan-failure', '--error=bad', '--input=a'],
+    ['--mode=plan-failure', '--error=bad', '--report-url=https://example.test/report'],
+    ['--mode=plan-failure', '--error=bad', '--artifact-url=https://example.test/artifact']
   ]) assert.throws(() => summary.parseSummaryArgs(argv));
 });
 
