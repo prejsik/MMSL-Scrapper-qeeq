@@ -2563,3 +2563,43 @@ test('browser-backed validator accepts a synchronous fresh autocomplete response
   assert.equal(result.validated_airports, 9);
   assert.equal(fake.submitted, false);
 });
+
+test('autocomplete resolver waits for the current QEEQ pickup input to render', async () => {
+  const { SELECTORS, resolveVisibleAirportMatches } = require('../src/qeeq/scraper');
+  let inputVisible = false;
+  let query = '';
+  let sleeps = 0;
+  const input = {
+    isVisible: async () => inputVisible,
+    fill: async value => { query = value; }
+  };
+  const suggestion = {
+    isVisible: async () => true,
+    innerText: async () => '',
+    getAttribute: async name => name === 'title'
+      ? 'Port Lotniczy Katowice-Pyrzowice(KTW), Katowice, Województwo śląskie, Polska'
+      : name === 'data-role' ? 'item' : null
+  };
+  const page = {
+    locator(selector) {
+      if (selector === SELECTORS.pickupInput) return { count: async () => 1, nth: () => input };
+      if (selector === SELECTORS.pickupSuggestion) {
+        return { count: async () => query ? 1 : 0, nth: () => suggestion };
+      }
+      throw new Error(`unexpected selector: ${selector}`);
+    }
+  };
+  const matches = await resolveVisibleAirportMatches(page, {
+    label: 'Port Lotniczy Katowice-Pyrzowice',
+    iata: 'KTW'
+  }, {
+    timeoutMs: 300,
+    sleep: async () => {
+      sleeps += 1;
+      inputVisible = true;
+    }
+  });
+  assert.equal(sleeps >= 1, true);
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].iata, 'KTW');
+});

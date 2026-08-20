@@ -156,10 +156,10 @@ function airportSuggestionFingerprint(suggestions) {
 }
 
 async function resolveVisibleAirportMatches(page, airport, options = {}) {
-  const pickupInput = await firstVisibleLocator(page.locator(SELECTORS.pickupInput));
-  if (!pickupInput) return [];
   const timeoutMs = options.timeoutMs ?? 30000;
   const sleep = options.sleep || (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)));
+  const pickupInput = await pollForVisible(page.locator(SELECTORS.pickupInput), timeoutMs, sleep);
+  if (!pickupInput) return [];
   const pollMs = 100;
   const maximumPolls = Math.max(1, Math.ceil(timeoutMs / pollMs));
   const preQueryFingerprint = airportSuggestionFingerprint(await visibleAirportSuggestions(page));
