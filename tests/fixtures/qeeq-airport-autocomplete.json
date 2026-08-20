@@ -1,0 +1,11 @@
+[
+  {"label":"Lotnisko Chopina w Warszawie","iata":"WAW","city":"2486","landmark":"98942","dataType":"airport","type":"2"},
+  {"label":"Lotnisko Warszawa Modlin","iata":"WMI","city":"2486","landmark":"99522","dataType":"airport","type":"2"},
+  {"label":"Lotnisko w Krakowie","iata":"KRK","city":"2479","landmark":"98939","dataType":"airport","type":"2"},
+  {"label":"Lotnisko Gdańsk","iata":"GDN","city":"2475","landmark":"99177","dataType":"airport","type":"2"},
+  {"label":"Port Lotniczy Katowice-Pyrzowice","iata":"KTW","city":"2477","landmark":"404260","dataType":"airport","type":"2"},
+  {"label":"Lotnisko we Wrocławiu","iata":"WRO","city":"2487","landmark":"98954","dataType":"airport","type":"2"},
+  {"label":"Lotnisko Poznań","iata":"POZ","city":"2483","landmark":"99001","dataType":"airport","type":"2"},
+  {"label":"Port Lotniczy Bydgoszcz","iata":"BZG","city":"2474","landmark":"98976","dataType":"airport","type":"2"},
+  {"label":"Port Lotniczy Łódź","iata":"LCJ","city":"2480","landmark":"98993","dataType":"airport","type":"2"}
+]

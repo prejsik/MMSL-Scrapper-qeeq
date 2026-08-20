@@ -58,3 +58,74 @@ test('config accepts both equals and space-form arguments', () => {
   assert.equal(parseCliArgs(['--config=qeeq.config.example.json']).config, 'qeeq.config.example.json');
   assert.equal(parseCliArgs(['--config', 'qeeq.config.example.json']).config, 'qeeq.config.example.json');
 });
+
+test('location catalog contains eight cities and nine airports', () => {
+  const { defaultLocationCities, expectedAirportCount } = require('../src/qeeq/locations');
+  const cities = defaultLocationCities();
+  assert.equal(cities.length, 8);
+  assert.equal(expectedAirportCount(cities), 9);
+});
+
+test('full scheduled matrix expands to 7020 airport searches', () => {
+  const { expandScenarios } = require('../src/qeeq/run');
+  const { defaultLocationCities } = require('../src/qeeq/locations');
+  const config = {
+    locations: defaultLocationCities(),
+    timeZone: 'Europe/Warsaw',
+    startDates: [],
+    rollingDays: 60,
+    durationsDays: [2,3,4,5,6,7,8,9,10,11,12,13,14],
+    pickupTime: '10:00',
+    dropoffTime: '10:00',
+    maxScenarios: 7020
+  };
+  const scenarios = expandScenarios(config, new Date('2026-08-20T10:00:00+02:00'));
+  assert.equal(scenarios.length, 7020);
+  assert.equal(new Set(scenarios.map(item => item.key)).size, 7020);
+});
+
+test('rolling dates begin tomorrow in Europe Warsaw across UTC midnight', () => {
+  const { expandScenarios } = require('../src/qeeq/run');
+  const scenarios = expandScenarios({ locations: ['Katowice'], startDates: [], rollingDays: 1, durationsDays: [2], pickupTime: '10:00', dropoffTime: '10:00', timeZone: 'Europe/Warsaw', maxScenarios: 7020 }, new Date('2026-08-20T22:30:00Z'));
+  assert.equal(scenarios[0].pickupDate, '2026-08-22');
+  assert.equal(scenarios[0].rentalDays, 2);
+});
+
+test('scenario expansion refuses a matrix above the configured cap', () => {
+  const { expandScenarios } = require('../src/qeeq/run');
+  const { defaultLocationCities } = require('../src/qeeq/locations');
+  assert.throws(() => expandScenarios({
+    locations: defaultLocationCities(), startDates: [], rollingDays: 61,
+    durationsDays: [2,3,4,5,6,7,8,9,10,11,12,13,14],
+    pickupTime: '10:00', dropoffTime: '10:00', timeZone: 'Europe/Warsaw', maxScenarios: 7020
+  }, new Date('2026-08-20T10:00:00+02:00')), /Scenario count 7137 exceeds maxScenarios 7020/);
+});
+
+test('catalog warns when live QEEQ IDs drift for the same IATA', () => {
+  const { compareLiveAirport, locationCatalog } = require('../src/qeeq/locations');
+  const ktw = locationCatalog.find(city => city.city === 'Katowice').airports[0];
+  const result = compareLiveAirport(ktw, { label: ktw.label, iata: 'KTW', city: '2477', landmark: '999999', dataType: ktw.dataType, type: '2' });
+  assert.equal(result.useLiveIds, true);
+  assert.equal(result.qualityWarning.code, 'location_id_drift');
+});
+
+test('all nine airports match the sanitized live autocomplete fixture', () => {
+  const live = require('./fixtures/qeeq-airport-autocomplete.json');
+  const { compareLiveAirport, locationCatalog } = require('../src/qeeq/locations');
+  const catalog = locationCatalog.flatMap(entry => entry.airports);
+  assert.equal(live.length, 9);
+  for (const airport of catalog) {
+    const match = live.find(item => item.iata === airport.iata);
+    const result = compareLiveAirport(airport, match);
+    assert.equal(result.error, undefined, airport.iata);
+    assert.equal(result.useLiveIds, true, airport.iata);
+  }
+});
+
+test('live airport identity requires IATA normalized label and type', () => {
+  const { compareLiveAirport, locationCatalog } = require('../src/qeeq/locations');
+  const ktw = locationCatalog.find(city => city.city === 'Katowice').airports[0];
+  assert.equal(compareLiveAirport(ktw, { ...ktw, label: 'Lotnisko Kraków', type: '2' }).error.code, 'location_label_mismatch');
+  assert.equal(compareLiveAirport(ktw, { ...ktw, type: '1' }).error.code, 'location_type_mismatch');
+  assert.equal(compareLiveAirport(ktw, { ...ktw, dataType: 'city' }).error.code, 'location_data_type_mismatch');
+});
