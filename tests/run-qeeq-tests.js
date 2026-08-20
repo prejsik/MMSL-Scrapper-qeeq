@@ -2549,3 +2549,17 @@ test('current QEEQ autocomplete title and selected hidden value yield canonical 
     dataType: 'airport'
   });
 });
+
+test('browser-backed validator accepts a synchronous fresh autocomplete response without submitting', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { validateLiveLocationCatalog } = require('../src/qeeq/validateLocations');
+  const fake = createFakeQeeqBrowser({ autocompleteDelayPolls: 0 });
+  const result = await validateLiveLocationCatalog(task5Config(), {
+    launchBrowser: fake.launchBrowser,
+    now: fake.now,
+    sleep: fake.sleep
+  });
+  assert.equal(result.validation_status, 'pass');
+  assert.equal(result.validated_airports, 9);
+  assert.equal(fake.submitted, false);
+});
