@@ -1945,3 +1945,101 @@ test('XLSX exposes exact interfaces and CLI writes a same-directory atomic file 
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('XLSX redacts every secret diagnostic value without collapsing distinct occurrences', async () => {
+  const { buildWorkbook } = require('../src/qeeq/reportXlsx');
+  const secrets = ['SECRET-ID', 'SECRET-CLID', 'SECRET-VV', 'SECRET-FPT', 'SECRET-A', 'SECRET-B', 'SECRET-TS', 'SECRET-QFPT', 'SECRET-CITY', 'SECRET-LANDMARK', 'SECRET-AUTH', 'SECRET-COOKIE'];
+  const diagnosticCodes = [
+    `id=${secrets[0]}`, `clid:${secrets[1]}`, `_vv_=${secrets[2]}`, `fpt:${secrets[3]}`,
+    `ticket:${secrets[4]}`, `ticket:${secrets[5]}`, `ts=${secrets[6]}`, `qeeq_fpt:${secrets[7]}`,
+    `qeeq_city_id=${secrets[8]}`, `qeeq_landmark_id:${secrets[9]}`,
+    `Authorization: Bearer ${secrets[10]}`, `cookie=${secrets[11]}`, 'safe_quality_code'
+  ];
+  const workbook = await buildWorkbook({
+    run_status: 'partial', quality_status: 'warning',
+    scenarios: [{ key: 'ktw:2026-09-19:2', status: 'success', offers: [], quality_errors: diagnosticCodes }]
+  });
+  const values = workbook.worksheets.flatMap(sheet => sheet.getSheetValues().flat(3)).filter(value => value !== null && value !== undefined).join('|');
+  for (const secret of secrets) assert.doesNotMatch(values, new RegExp(secret));
+  assert.doesNotMatch(values, /qeeq_city_id|qeeq_landmark_id|authorization|cookie/i);
+  assert.match(values, /safe_quality_code/);
+  const rows = workbook.getWorksheet('Data quality').getSheetValues().slice(2);
+  const ticket = rows.find(row => row[2] === 'ticket=[redacted]');
+  assert.ok(ticket);
+  assert.equal(ticket[3], 2);
+});
+
+test('XLSX rejects hostile scalar objects at every projection and ordering boundary', async () => {
+  const { buildWorkbook } = require('../src/qeeq/reportXlsx');
+  const hostile = { toString: null };
+  const payloads = [
+    { run_status: hostile, quality_status: hostile, scenarios: [] },
+    { run_status: 'success', quality_status: 'pass', scenarios: [{ key: 'bad-airport', iata: hostile, airport_key: hostile, rental_days: 2, offers: [] }] },
+    { run_status: 'success', quality_status: 'pass', scenarios: [{ key: 'bad-duration', iata: 'KTW', rental_days: hostile, offers: [] }] },
+    { run_status: 'success', quality_status: 'pass', scenarios: [{ key: 'bad-labels', iata: 'KTW', rental_days: 2, status: hostile, offers: [{ provider_name: hostile, vehicle_name: hostile, total_price: 100, price_tier: 'public', price_verified: true }] }] }
+  ];
+  for (const payload of payloads) {
+    const first = await buildWorkbook(payload);
+    const second = await buildWorkbook(payload);
+    assert.deepEqual(first.worksheets.map(sheet => sheet.getSheetValues()), second.worksheets.map(sheet => sheet.getSheetValues()));
+    const projected = first.worksheets.flatMap(sheet => sheet.getSheetValues().flat(3));
+    assert.equal(projected.includes(hostile), false);
+  }
+});
+
+test('XLSX atomic failures preserve the primary error while still attempting temp cleanup', () => {
+  const { spawnSync } = require('node:child_process');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-xlsx-errors-'));
+  const input = path.join(directory, 'input.json');
+  const output = path.join(directory, 'report.xlsx');
+  const hook = path.join(directory, 'failure-hook.cjs');
+  const runner = path.join(directory, 'runner.cjs');
+  const modulePath = path.resolve(__dirname, '../src/qeeq/reportXlsx.js');
+  const excelPath = require.resolve('exceljs');
+  try {
+    fs.writeFileSync(input, JSON.stringify({ run_status: 'success', quality_status: 'pass', scenarios: [] }));
+    fs.writeFileSync(output, 'OLD XLSX');
+    fs.writeFileSync(hook, `
+      const fs = require('node:fs');
+      const originalWrite = fs.writeFileSync.bind(fs);
+      const originalRm = fs.rmSync.bind(fs);
+      const mode = process.env.QEEQ_FAILURE_MODE;
+      if (mode === 'write') {
+        const ExcelJS = require(${JSON.stringify(excelPath)});
+        const OriginalWorkbook = ExcelJS.Workbook;
+        ExcelJS.Workbook = class extends OriginalWorkbook {
+          constructor() { super(); this.xlsx.writeFile = async () => { throw new Error('PRIMARY_WRITE'); }; }
+        };
+      }
+      if (mode === 'rename') fs.renameSync = () => { throw new Error('PRIMARY_RENAME'); };
+      fs.rmSync = (target, options) => {
+        if (String(target).endsWith('.tmp')) {
+          originalWrite(process.env.QEEQ_CLEANUP_MARKER + '.' + mode, 'attempted');
+          throw new Error('CLEANUP_FAILURE');
+        }
+        return originalRm(target, options);
+      };
+    `);
+    fs.writeFileSync(runner, `
+      require(${JSON.stringify(modulePath)}).generateWorkbookFromFile(${JSON.stringify(input)}, ${JSON.stringify(output)})
+        .then(() => { process.exitCode = 0; })
+        .catch(error => { process.stdout.write(error.message); process.exitCode = 7; });
+    `);
+    for (const mode of ['write', 'rename']) {
+      const marker = path.join(directory, 'cleanup-attempted');
+      const result = spawnSync(process.execPath, ['-r', hook, runner], {
+        encoding: 'utf8',
+        env: { ...process.env, QEEQ_FAILURE_MODE: mode, QEEQ_CLEANUP_MARKER: marker }
+      });
+      assert.equal(result.status, 7, result.stderr);
+      assert.equal(result.stdout, mode === 'write' ? 'PRIMARY_WRITE' : 'PRIMARY_RENAME');
+      assert.equal(fs.readFileSync(`${marker}.${mode}`, 'utf8'), 'attempted');
+      assert.equal(fs.readFileSync(output, 'utf8'), 'OLD XLSX');
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

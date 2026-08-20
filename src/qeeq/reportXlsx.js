@@ -11,7 +11,7 @@ const INTEGER_FORMAT = '#,##0';
 const DATE_FORMAT = 'yyyy-mm-dd hh:mm';
 const HEADER_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F4E78' } };
 const STATUS_COLORS = { green: 'FF70AD47', yellow: 'FFFFC000', red: 'FFC00000' };
-const FORBIDDEN_DIAGNOSTIC = /(^|[?&#,;\s])(id|clid|_vv_|fpt|ticket|ts|qeeq_fpt|authorization|cookie)\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|[^&?#,;\s<>]+)/gi;
+const FORBIDDEN_DIAGNOSTIC = /(^|[?&#,;\s])(id|clid|_vv_|fpt|ticket|ts|qeeq_fpt|qeeq_city_id|qeeq_landmark_id|authorization|cookie)\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|[^&?#,;\s<>]+)/gi;
 
 const DETAIL_COLUMNS = [
   'Scenario key', 'Status', 'City', 'Airport key', 'IATA', 'Pickup at', 'Drop-off at', 'Rental days',
@@ -36,11 +36,18 @@ function finite(value) {
   return Number.isFinite(value) ? value : null;
 }
 
+function primitiveText(value) {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return `${value}`;
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  return '';
+}
+
 function safeText(value) {
   if (typeof value !== 'string') return null;
   const redacted = sanitizeDiagnosticText(value)
     .replace(FORBIDDEN_DIAGNOSTIC, (_, separator, field) => `${separator}${field}=[redacted]`)
-    .replace(/\b(?:cookie|authorization)=\[redacted\]/gi, '[redacted]');
+    .replace(/\b(?:qeeq_city_id|qeeq_landmark_id|cookie|authorization)=\[redacted\]/gi, '[redacted]');
   return /^[=+\-@]/.test(redacted) ? `'${redacted}` : redacted;
 }
 
@@ -112,8 +119,8 @@ function buildDetailRows(payload = {}) {
 }
 
 function compareText(left, right) {
-  const a = String(left ?? '');
-  const b = String(right ?? '');
+  const a = primitiveText(left);
+  const b = primitiveText(right);
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
@@ -130,8 +137,8 @@ function formatSheet(sheet, formats = {}) {
   });
   for (let index = 1; index <= lastColumn; index += 1) {
     const column = sheet.getColumn(index);
-    const values = [String(column.header || ''), ...column.values.slice(2)
-      .map(value => value instanceof Date ? 'yyyy-mm-dd hh:mm' : String(value ?? ''))
+    const values = [primitiveText(column.header), ...column.values.slice(2)
+      .map(value => value instanceof Date ? 'yyyy-mm-dd hh:mm' : primitiveText(value))
       .filter(value => typeof value === 'string')];
     column.width = Math.min(32, Math.max(10, ...values.map(value => value.length + 2)));
     if (formats[column.header]) column.numFmt = formats[column.header];
@@ -173,7 +180,8 @@ function aggregateRows(payload, dimension, label) {
   for (const scenario of scenarioObjects(payload)) {
     const key = dimension(scenario);
     if (key === null || key === undefined || key === '') continue;
-    const name = safeText(String(key));
+    const name = typeof key === 'string' ? safeText(key) : primitiveText(key);
+    if (!name) continue;
     if (!groups.has(name)) groups.set(name, { scenarios: 0, offers: 0, verified: 0, totals: [] });
     const group = groups.get(name);
     group.scenarios += 1;
@@ -221,13 +229,14 @@ function diagnosticRows(payload) {
   const root = isPlainObject(payload) ? payload : {};
   const diagnostics = new Map();
   const add = (severity, codeValue, scenarioValue, token) => {
+    const rawCode = typeof codeValue === 'string' ? codeValue : '';
     const code = safeText(codeValue);
     if (!code) return;
     const key = safeScenarioKey(scenarioValue);
     if (!diagnostics.has(code)) diagnostics.set(code, { severity, occurrences: new Set(), scenarios: new Set() });
     const entry = diagnostics.get(code);
     if (severity === 'Error') entry.severity = 'Error';
-    entry.occurrences.add(key ? `${severity}:${code}:${key}` : token);
+    entry.occurrences.add(key ? `${severity}:${rawCode}:${key}` : token);
     if (key) entry.scenarios.add(key);
   };
   for (const scenario of scenarioObjects(root)) {
@@ -249,7 +258,7 @@ function diagnosticRows(payload) {
 }
 
 function statusFill(status, type) {
-  const value = String(status || '').toLowerCase();
+  const value = (safeText(status) || '').toLowerCase();
   const color = type === 'run'
     ? (value === 'success' ? 'green' : value === 'partial' ? 'yellow' : 'red')
     : (value === 'pass' ? 'green' : value === 'warning' ? 'yellow' : 'red');
@@ -336,7 +345,11 @@ async function generateWorkbookFromFile(inputPath, outputPath) {
     await workbook.xlsx.writeFile(temporary);
     fs.renameSync(temporary, output);
   } catch (error) {
-    fs.rmSync(temporary, { force: true });
+    try {
+      fs.rmSync(temporary, { force: true });
+    } catch {
+      // Preserve the write/rename failure; cleanup was best-effort.
+    }
     throw error;
   }
   return output;
