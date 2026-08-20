@@ -138,8 +138,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: npm
-      - run: npm ci
       - name: Notify plan failure
         shell: bash
         env:
@@ -228,6 +226,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Download every available chunk
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           pattern: qeeq-results-*
@@ -242,6 +241,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p output
+          mkdir -p downloaded-parts
           cp plan-input/expected-scenario-keys.json expected-scenario-keys.json
           code=0
           set +e

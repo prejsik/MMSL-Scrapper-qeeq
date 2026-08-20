@@ -2456,3 +2456,81 @@ test('daily final status maps every infrastructure job failure to code one', () 
   assert.match(finalStatus, /failure\|cancelled/);
   assert.match(finalStatus, /0\|1\|2\) exit "\$MERGED_CODE"/);
 });
+
+test('plan-failure notification has no install dependency and uses only the pure summary builder', () => {
+  const fs = require('node:fs');
+  const yaml = fs.readFileSync('.github/workflows/qeeq-daily.yml', 'utf8');
+  const start = yaml.indexOf('  notify-plan-failure:');
+  const section = yaml.slice(start, yaml.indexOf('  scrape:', start));
+  assert.ok(start >= 0);
+  assert.doesNotMatch(section, /npm ci|npm install|cache:\s*npm/);
+  assert.match(section, /node src\/qeeq\/telegramSummary\.js --mode=plan-failure/);
+  assert.doesNotMatch(section, /QEEQ plan failure/);
+  assert.deepEqual([...section.matchAll(/secrets\.([A-Z0-9_]+)/g)].map(match => match[1]).sort(), [
+    'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID'
+  ]);
+});
+
+test('merge CLI turns an empty chunk tree plus authoritative keys into canonical missing scenarios', () => {
+  const { spawnSync } = require('node:child_process');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-empty-chunks-'));
+  const inputDir = path.join(directory, 'downloaded-parts');
+  const expectedFile = path.join(directory, 'expected.json');
+  const outputJson = path.join(directory, 'output', 'qeeq-results-latest.json');
+  const outputCsv = path.join(directory, 'output', 'qeeq-results.csv');
+  const mergeScript = path.resolve(__dirname, '../src/qeeq/mergeResults.js');
+  try {
+    fs.mkdirSync(inputDir);
+    fs.writeFileSync(expectedFile, JSON.stringify(['katowice-pyrzowice:2026-08-21:2']));
+    const result = spawnSync(process.execPath, [mergeScript,
+      `--input-dir=${inputDir}`, `--expected-keys-file=${expectedFile}`,
+      `--output-json=${outputJson}`, `--output-csv=${outputCsv}`
+    ], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const payload = JSON.parse(fs.readFileSync(outputJson, 'utf8'));
+    assert.equal(payload.run_status, 'failure');
+    assert.equal(payload.quality_status, 'fail');
+    assert.equal(payload.expected_checks, 1);
+    assert.equal(payload.completed_checks, 0);
+    assert.equal(payload.failed_checks, 1);
+    assert.deepEqual(payload.scenarios, []);
+    assert.deepEqual(payload.errors, [{ code: 'missing_chunk_scenario', scenario_key: 'katowice-pyrzowice:2026-08-21:2' }]);
+    assert.equal(fs.existsSync(outputCsv), true);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('daily merge creates an empty chunk tree when no chunk artifact can be downloaded', () => {
+  const fs = require('node:fs');
+  const yaml = fs.readFileSync('.github/workflows/qeeq-daily.yml', 'utf8');
+  const mergeStart = yaml.indexOf('  merge:');
+  const merge = yaml.slice(mergeStart, yaml.indexOf('  pages:', mergeStart));
+  const downloadStart = merge.indexOf('- name: Download every available chunk');
+  const download = merge.slice(downloadStart, merge.indexOf('- name: Download authoritative expected keys', downloadStart));
+  assert.match(download, /continue-on-error:\s*true/);
+  assert.match(merge, /mkdir -p downloaded-parts/);
+  assert.match(merge, /--expected-keys-file=expected-scenario-keys\.json/);
+  assert.match(merge, /name: Upload merged reports[\s\S]*if:\s*always\(\)/);
+});
+
+test('workflow planner enforces GitHub timeout and parallelism boundaries without clamping', () => {
+  const { buildWorkflowPlan } = require('../src/qeeq/workflowPlan');
+  const base = {
+    eventName: 'workflow_dispatch', timeZone: 'Europe/Warsaw', locations: ['Katowice'],
+    rollingDays: 10, durationsDays: [2], acknowledgeExpandedRun: true, benchmarkStage: 4,
+    p50ScenarioSeconds: 1000, p95ScenarioSeconds: 1400, maxParallel: 256,
+    targetChunkMinutes: 234, maxBrowserMinutes: 1000,
+    now: new Date('2026-08-20T10:00:00+02:00')
+  };
+  const boundary = buildWorkflowPlan(base);
+  assert.equal(boundary.chunk_timeout_minutes, 360);
+  assert.equal(boundary.max_parallel, 256);
+  assert.throws(() => buildWorkflowPlan({ ...base, p95ScenarioSeconds: 1401 }), /chunk timeout.*360/i);
+  assert.throws(() => buildWorkflowPlan({ ...base, maxParallel: 257 }), /maxParallel.*at most 256/);
+  assert.throws(() => buildWorkflowPlan({ ...base, planOnly: true, p95ScenarioSeconds: 1401 }), /chunk timeout.*360/i);
+  assert.throws(() => buildWorkflowPlan({ ...base, planOnly: true, maxParallel: 257 }), /maxParallel.*at most 256/);
+});

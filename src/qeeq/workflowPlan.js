@@ -6,6 +6,7 @@ const { catalogEntryForLocation } = require('./locations');
 
 const TIME_ZONE = 'Europe/Warsaw';
 const MAX_MATRIX_ENTRIES = 256;
+const MAX_JOB_TIMEOUT_MINUTES = 360;
 const SAFE_MANUAL_TIMEOUT_MINUTES = 30;
 const SETUP_ALLOWANCE_MINUTES = 10;
 
@@ -115,10 +116,12 @@ function validateMeasurements(input) {
   const p50 = positiveFinite(input.p50ScenarioSeconds, 'p50ScenarioSeconds');
   const p95 = positiveFinite(input.p95ScenarioSeconds, 'p95ScenarioSeconds');
   if (p95 < p50) throw new Error('p95ScenarioSeconds must be at least p50ScenarioSeconds');
+  const maxParallel = positiveInteger(input.maxParallel, 'maxParallel');
+  if (maxParallel > MAX_MATRIX_ENTRIES) throw new Error(`maxParallel must be at most ${MAX_MATRIX_ENTRIES}`);
   return {
     p50,
     p95,
-    maxParallel: positiveInteger(input.maxParallel, 'maxParallel'),
+    maxParallel,
     targetChunkMinutes: positiveFinite(input.targetChunkMinutes, 'targetChunkMinutes'),
     maxBrowserMinutes: positiveFinite(input.maxBrowserMinutes, 'maxBrowserMinutes')
   };
@@ -175,6 +178,9 @@ function buildWorkflowPlan(rawInput = {}) {
   const chunkTimeoutMinutes = measurements
     ? Math.ceil((datesPerChunk * scenariosPerDate * measurements.p95 / 60) * 1.5 + SETUP_ALLOWANCE_MINUTES)
     : SAFE_MANUAL_TIMEOUT_MINUTES;
+  if (chunkTimeoutMinutes > MAX_JOB_TIMEOUT_MINUTES) {
+    throw new Error(`Derived chunk timeout exceeds GitHub's ${MAX_JOB_TIMEOUT_MINUTES}-minute limit`);
+  }
   const matrix = {
     include: dateChunks.map((chunk, index) => ({
       chunk_id: `chunk-${String(index + 1).padStart(3, '0')}`,
