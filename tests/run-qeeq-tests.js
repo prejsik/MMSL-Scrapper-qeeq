@@ -145,3 +145,64 @@ test('live airport identity requires IATA normalized label and type', () => {
   assert.equal(compareLiveAirport(ktw, { ...ktw, type: '1' }).error.code, 'location_type_mismatch');
   assert.equal(compareLiveAirport(ktw, { ...ktw, dataType: 'city' }).error.code, 'location_data_type_mismatch');
 });
+
+test('newcomer coupon and Diamond totals remain separate from public price', () => {
+  const { normalizePriceCandidate } = require('../src/qeeq/utils');
+  const result = normalizePriceCandidate({
+    displayedText: 'Cena ze zniżką 106 zł',
+    discountType: 'newcomer_coupon',
+    memberText: 'Cena Diamentowa 98 zł',
+    rentalPeriodText: 'łącznie za 2 dni',
+    rentalDays: 2
+  });
+  assert.equal(result.total_price, null);
+  assert.equal(result.daily_price, null);
+  assert.equal(result.conditional_offer_total, 106);
+  assert.equal(result.conditional_offer_daily, 53);
+  assert.equal(result.conditional_offer_type, 'newcomer_coupon');
+  assert.equal(result.conditional_member_total, 98);
+  assert.equal(result.conditional_member_daily, 49);
+  assert.equal(result.price_tier, 'conditional');
+  assert.equal(result.price_scope, 'total');
+  assert.equal(result.price_verified, false);
+  assert.equal(result.conditional_price_verified, true);
+});
+
+test('an explicit non-conditional two-day total can become verified public price', () => {
+  const { normalizePriceCandidate } = require('../src/qeeq/utils');
+  const result = normalizePriceCandidate({
+    displayedText: 'Cena 119 zł', discountType: null,
+    rentalPeriodText: 'łącznie za 2 dni', rentalDays: 2
+  });
+  assert.equal(result.total_price, 119);
+  assert.equal(result.daily_price, 59.5);
+  assert.equal(result.price_tier, 'public');
+  assert.equal(result.price_verified, true);
+});
+
+test('rating deposit and discount percent cannot become price', () => {
+  const { parseMoney } = require('../src/qeeq/utils');
+  assert.equal(parseMoney('Ocena 8.5', 'PLN'), null);
+  assert.equal(parseMoney('Depozyt: 3 399,99 zł', 'PLN', { rejectLabels: ['Depozyt'] }), null);
+  assert.equal(parseMoney('60% zniżki', 'PLN'), null);
+});
+
+test('ranking excludes Diamond-only and unverified prices', () => {
+  const { rankVerifiedPublicOffers } = require('../src/qeeq/utils');
+  const ranked = rankVerifiedPublicOffers([
+    { id: 'diamond', price_tier: 'diamond', price_verified: true, total_price: 98 },
+    { id: 'public-b', price_tier: 'public', price_verified: true, total_price: 119 },
+    { id: 'unknown', price_tier: 'public', price_verified: false, total_price: 90 },
+    { id: 'newcomer', price_tier: 'conditional', price_verified: false, conditional_offer_total: 106 },
+    { id: 'public-a', price_tier: 'public', price_verified: true, total_price: 110 }
+  ]);
+  assert.deepEqual(ranked.map(item => item.id), ['public-a', 'public-b']);
+});
+
+test('diagnostics redact QEEQ session values', () => {
+  const { sanitizeDiagnosticText, sanitizeSourceUrl } = require('../src/qeeq/utils');
+  const url = 'https://www.qeeq.pl/car/search?id=secret-session&ticket=secret-ticket&ts=123';
+  assert.equal(sanitizeSourceUrl(url), 'https://www.qeeq.pl/car/search');
+  const clean = sanitizeDiagnosticText('id=secret-session clid=session-2 _vv_=view-secret fpt=abc ticket=def ts=123 qeeq_fpt=cookie');
+  assert.doesNotMatch(clean, /secret-session|session-2|view-secret|abc|def|123|cookie/);
+});
