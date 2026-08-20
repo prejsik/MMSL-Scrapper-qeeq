@@ -1,0 +1,8 @@
+node_modules/
+output/
+artifacts/
+downloaded-parts/
+.playwright-cli/
+.env
+*.log
+*.tmp
