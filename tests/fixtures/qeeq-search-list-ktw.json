@@ -1,0 +1,25 @@
+{
+  "data": {
+    "list": [
+      {
+        "meal_list": [
+          {
+            "id": "2300001",
+            "bid": "6a871ed1fe71926084fb2166",
+            "pickup_shop": "813805655",
+            "best_price_info": null,
+            "diamond_price_info": null,
+            "origin_price_info": null
+          }
+        ]
+      }
+    ],
+    "shops": [
+      {
+        "id": "813805655",
+        "name": "Carwiz",
+        "score": 8.5
+      }
+    ]
+  }
+}

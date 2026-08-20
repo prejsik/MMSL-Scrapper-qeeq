@@ -259,3 +259,64 @@ test('diagnostics redact quoted Bearer tokens and equals-style credential header
   const clean = sanitizeDiagnosticText('Bearer "synthetic-bearer-secret"\nCookie = sid=synthetic-cookie-secret\nAuthorization = Bearer \'synthetic-authorization-secret\'');
   assert.doesNotMatch(clean, /synthetic-bearer-secret|synthetic-cookie-secret|synthetic-authorization-secret/);
 });
+
+test('expanded provider offer is the canonical record', () => {
+  const domFixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { buildOfferBusinessKey, parseObservedListPayload, parseOfferSnapshot } = require('../src/qeeq/scraper');
+  const providers = parseObservedListPayload(apiFixture);
+  const key = buildOfferBusinessKey(domFixture.offer.businessId, domFixture.offer.businessBid);
+  assert.equal(providers.get(key)[0].providerName, 'CARWIZ');
+  const offer = parseOfferSnapshot(domFixture.offer, { rentalDays: 2, vehicle: domFixture.vehicle }, providers);
+  assert.equal(offer.provider_name, 'CARWIZ');
+  assert.equal(offer.total_price, null);
+  assert.equal(offer.daily_price, null);
+  assert.equal(offer.conditional_offer_total, 106);
+  assert.equal(offer.conditional_offer_daily, 53);
+  assert.equal(offer.conditional_offer_type, 'newcomer_coupon');
+  assert.equal(offer.conditional_member_total, 98);
+  assert.equal(offer.reference_price, null);
+  assert.equal(offer.deposit_amount, 3399.99);
+  assert.equal(offer.provider_rating, 8.5);
+  assert.equal(offer.price_tier, 'conditional');
+  assert.equal(offer.price_verified, false);
+  assert.equal(offer.conditional_price_verified, true);
+});
+
+test('vehicle group parser emits diagnostic group data only', () => {
+  const fixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const { parseGroupSnapshot } = require('../src/qeeq/scraper');
+  const group = parseGroupSnapshot(fixture.vehicle, { rentalDays: 2 });
+  assert.equal(group.record_type, 'group');
+  assert.equal(group.vehicle_name, 'Skoda Fabia');
+  assert.equal(group.provider_name, undefined);
+  assert.equal(group.price_verified, false);
+});
+
+test('group-only observations do not enter Top 3', () => {
+  const { selectTopPublicOffers } = require('../src/qeeq/scraper');
+  const result = selectTopPublicOffers([
+    { record_type: 'group', total_price: 90, price_tier: 'public', price_verified: true },
+    { record_type: 'offer', conditional_offer_total: 106, price_tier: 'conditional', price_verified: false, provider_name: 'CARWIZ' },
+    { record_type: 'offer', total_price: 119, price_tier: 'public', price_verified: true, provider_name: 'PUBLIC PROVIDER' }
+  ], 3);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].provider_name, 'PUBLIC PROVIDER');
+});
+
+test('sidebar filter values never populate an offer', () => {
+  const fixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const { parseOfferSnapshot } = require('../src/qeeq/scraper');
+  const offer = parseOfferSnapshot({ ...fixture.offer, ratingText: '', depositText: '' }, { rentalDays: 2, vehicle: fixture.vehicle }, new Map());
+  assert.equal(offer.provider_rating, null);
+  assert.equal(offer.deposit_amount, null);
+});
+
+test('missing and ambiguous business-key matches never invent a provider', () => {
+  const fixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const { buildOfferBusinessKey, resolveProviderForOffer } = require('../src/qeeq/scraper');
+  const key = buildOfferBusinessKey(fixture.offer.businessId, fixture.offer.businessBid);
+  assert.equal(resolveProviderForOffer(fixture.offer, new Map()).quality_error, 'provider_unresolved');
+  const ambiguous = new Map([[key, [{ providerName: 'A' }, { providerName: 'B' }]]]);
+  assert.equal(resolveProviderForOffer(fixture.offer, ambiguous).quality_error, 'provider_ambiguous');
+});

@@ -1,0 +1,17 @@
+{
+  "vehicle": {
+    "vehicleName": "Skoda Fabia"
+  },
+  "offer": {
+    "businessId": "2300001",
+    "businessBid": "6a871ed1fe71926084fb2166",
+    "ratingText": "8.5",
+    "depositText": "Depozyt: 3 399,99 zł",
+    "displayedAmount": "106 zł",
+    "discountType": "newcomer_coupon",
+    "diamondAmount": "98 zł",
+    "rentalPeriodText": "łącznie za 2 dni",
+    "referencePriceText": null,
+    "sidebarText": "Ocena 9.9 · Depozyt: 1 zł (ignored)"
+  }
+}
