@@ -2567,6 +2567,7 @@ test('browser-backed validator accepts a synchronous fresh autocomplete response
 test('autocomplete resolver waits for the current QEEQ pickup input to render', async () => {
   const { SELECTORS, resolveVisibleAirportMatches } = require('../src/qeeq/scraper');
   let inputVisible = false;
+  let popupVisible = false;
   let query = '';
   let sleeps = 0;
   const input = {
@@ -2581,6 +2582,17 @@ test('autocomplete resolver waits for the current QEEQ pickup input to render', 
       : name === 'data-role' ? 'item' : null
   };
   const page = {
+    getByText(label) {
+      if (label !== 'Odrzuć nieobowiązkowe pliki cookie') {
+        return { count: async () => 0, nth() { return this; } };
+      }
+      return {
+        count: async () => 1,
+        nth() { return this; },
+        isVisible: async () => popupVisible,
+        click: async () => { popupVisible = false; }
+      };
+    },
     locator(selector) {
       if (selector === SELECTORS.pickupInput) return { count: async () => 1, nth: () => input };
       if (selector === SELECTORS.pickupSuggestion) {
@@ -2597,17 +2609,18 @@ test('autocomplete resolver waits for the current QEEQ pickup input to render', 
     sleep: async () => {
       sleeps += 1;
       inputVisible = true;
+      popupVisible = true;
     }
   });
   assert.equal(sleeps >= 1, true);
   assert.equal(matches.length, 1);
   assert.equal(matches[0].iata, 'KTW');
+  assert.equal(popupVisible, false);
 });
 
-test('airport identity selection dismisses a cookie dialog that rendered after navigation', async () => {
-  const { SELECTORS, selectAndReadAirportIdentity } = require('../src/qeeq/scraper');
+test('popup dismissor reports a cookie dialog that rendered after navigation', async () => {
+  const { dismissPolishPopups } = require('../src/qeeq/scraper');
   let popupVisible = true;
-  let selected = false;
   const page = {
     getByText(label) {
       if (label !== 'Odrzuć nieobowiązkowe pliki cookie') {
@@ -2619,26 +2632,108 @@ test('airport identity selection dismisses a cookie dialog that rendered after n
         isVisible: async () => popupVisible,
         click: async () => { popupVisible = false; }
       };
-    },
-    locator(selector) {
-      assert.equal(selector, SELECTORS.pickPlace);
+    }
+  };
+  assert.equal(await dismissPolishPopups(page, 300), true);
+  assert.equal(popupVisible, false);
+});
+
+test('selected autocomplete uses one deadline across delayed input late popup replacement and fresh retry', async () => {
+  const { SELECTORS, resolveSelectedAirportMatches } = require('../src/qeeq/scraper');
+  let nowMs = 0;
+  let query = '';
+  let generation = 0;
+  let popupVisible = false;
+  let popupClicks = 0;
+  let selections = 0;
+  const input = {
+    isVisible: async () => nowMs >= 100,
+    fill: async value => { query = value; }
+  };
+  const suggestionCollection = {
+    count: async () => query ? 1 : 0,
+    nth: () => {
+      const locatorGeneration = generation;
       return {
-        count: async () => 1,
-        nth: () => ({ inputValue: async () => 'pickup_city=2477&pickup_landmark=404260&data_type=airport' })
+        isVisible: async () => locatorGeneration === generation,
+        innerText: async () => '',
+        getAttribute: async name => name === 'title'
+          ? 'Port Lotniczy Katowice-Pyrzowice(KTW), Katowice, Województwo śląskie, Polska'
+          : name === 'data-role' ? 'item' : null,
+        click: async () => {
+          if (popupVisible || locatorGeneration !== generation) throw new Error('element is intercepted or stale');
+          selections += 1;
+        }
       };
     }
   };
-  const suggestion = {
-    label: 'Port Lotniczy Katowice-Pyrzowice',
-    iata: 'KTW',
-    locator: {
-      click: async () => {
-        if (popupVisible) throw new Error('cookie dialog intercepted click');
-        selected = true;
+  let firstSuggestionRead = true;
+  const page = {
+    getByText(label) {
+      if (label !== 'Odrzuć nieobowiązkowe pliki cookie') {
+        return { count: async () => 0, nth() { return this; } };
       }
+      return {
+        count: async () => 1,
+        nth() { return this; },
+        isVisible: async () => popupVisible,
+        click: async () => {
+          popupVisible = false;
+          popupClicks += 1;
+          generation += 1;
+        }
+      };
+    },
+    locator(selector) {
+      if (selector === SELECTORS.pickupInput) return { count: async () => 1, nth: () => input };
+      if (selector === SELECTORS.pickupSuggestion) {
+        if (query && firstSuggestionRead) {
+          firstSuggestionRead = false;
+          popupVisible = true;
+        }
+        return suggestionCollection;
+      }
+      if (selector === SELECTORS.pickPlace) {
+        return {
+          count: async () => 1,
+          nth: () => ({ inputValue: async () => 'pickup_city=2477&pickup_landmark=404260&data_type=airport' })
+        };
+      }
+      throw new Error(`unexpected selector: ${selector}`);
     }
   };
-  const identity = await selectAndReadAirportIdentity(page, suggestion);
-  assert.equal(selected, true);
-  assert.equal(identity.landmark, '404260');
+  const matches = await resolveSelectedAirportMatches(page, {
+    label: 'Port Lotniczy Katowice-Pyrzowice',
+    iata: 'KTW'
+  }, {
+    timeoutMs: 300,
+    nowMillis: () => nowMs,
+    sleep: async milliseconds => { nowMs += milliseconds; }
+  });
+  assert.equal(nowMs <= 300, true);
+  assert.equal(popupClicks, 1);
+  assert.equal(selections, 1);
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].landmark, '404260');
+});
+
+test('autocomplete resolver shares one absolute timeout between input and suggestion polling', async () => {
+  const { SELECTORS, resolveVisibleAirportMatches } = require('../src/qeeq/scraper');
+  let nowMs = 0;
+  const input = { isVisible: async () => nowMs >= 200, fill: async () => {} };
+  const page = {
+    getByText() { return { count: async () => 0, nth() { return this; } }; },
+    locator(selector) {
+      if (selector === SELECTORS.pickupInput) return { count: async () => 1, nth: () => input };
+      if (selector === SELECTORS.pickupSuggestion) return { count: async () => 0, nth() { throw new Error('no suggestion'); } };
+      throw new Error(`unexpected selector: ${selector}`);
+    }
+  };
+  const matches = await resolveVisibleAirportMatches(page, { label: 'Port Lotniczy Katowice-Pyrzowice', iata: 'KTW' }, {
+    timeoutMs: 300,
+    nowMillis: () => nowMs,
+    sleep: async milliseconds => { nowMs += milliseconds; }
+  });
+  assert.deepEqual(matches, []);
+  assert.equal(nowMs <= 300, true);
 });

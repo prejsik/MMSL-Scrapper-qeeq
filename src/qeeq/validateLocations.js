@@ -3,7 +3,7 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 
 const { compareLiveAirport, locationCatalog } = require('./locations');
-const { closeBrowserResources, dismissPolishPopups, resolveVisibleAirportMatches, selectAndReadAirportIdentity } = require('./scraper');
+const { closeBrowserResources, dismissPolishPopups, resolveSelectedAirportMatches } = require('./scraper');
 
 async function launchDefaultBrowser(config) {
   const { chromium } = require('playwright');
@@ -40,12 +40,12 @@ async function withBrowserResolver(config, deps, validate) {
     });
     await dismissPolishPopups(page);
     const resolveAirport = async airport => {
-      const matches = await resolveVisibleAirportMatches(page, airport, {
+      const matches = await resolveSelectedAirportMatches(page, airport, {
         timeoutMs: config.resultsTimeoutMs ?? 30000,
-        sleep
+        sleep,
+        nowMillis: deps.now ? () => new Date(deps.now()).getTime() : Date.now
       });
-      if (matches.length !== 1) return matches.map(publicSuggestion);
-      return [publicSuggestion(await selectAndReadAirportIdentity(page, matches[0]))];
+      return matches.map(publicSuggestion);
     };
     result = await validate(resolveAirport);
   } catch (error) {

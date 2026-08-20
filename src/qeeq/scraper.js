@@ -81,12 +81,17 @@ async function firstVisibleLocator(locator) {
   return null;
 }
 
-async function dismissPolishPopups(page) {
+async function dismissPolishPopups(page, timeoutMs) {
+  let dismissed = false;
   for (const label of ['Odrzuć nieobowiązkowe pliki cookie', 'OK']) {
     const control = page.getByText(label, { exact: true });
     const visibleControl = await firstVisibleLocator(control);
-    if (visibleControl) await visibleControl.click();
+    if (visibleControl) {
+      await visibleControl.click(timeoutMs === undefined ? undefined : { timeout: timeoutMs });
+      dismissed = true;
+    }
   }
+  return dismissed;
 }
 
 async function readSuggestion(locator) {
@@ -107,11 +112,11 @@ async function readSuggestion(locator) {
   };
 }
 
-async function selectAndReadAirportIdentity(page, suggestion) {
-  await dismissPolishPopups(page);
-  await suggestion.locator.click();
+async function readSelectedAirportIdentity(page, suggestion, timeoutMs) {
   const places = page.locator(SELECTORS.pickPlace);
-  const value = await places.count() > 0 ? await places.nth(0).inputValue() : '';
+  const value = await places.count() > 0
+    ? await places.nth(0).inputValue(timeoutMs === undefined ? undefined : { timeout: timeoutMs })
+    : '';
   const parsed = parseAutocompleteIdentity({
     title: suggestion.label,
     text: `${suggestion.label} (${suggestion.iata})`,
@@ -156,34 +161,84 @@ function airportSuggestionFingerprint(suggestions) {
   ].join('\u0000')).sort().join('\u0001');
 }
 
-async function resolveVisibleAirportMatches(page, airport, options = {}) {
+function autocompleteDeadline(options = {}) {
   const timeoutMs = options.timeoutMs ?? 30000;
-  const sleep = options.sleep || (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)));
-  const pickupInput = await pollForVisible(page.locator(SELECTORS.pickupInput), timeoutMs, sleep);
-  if (!pickupInput) return [];
-  const pollMs = 100;
-  const maximumPolls = Math.max(1, Math.ceil(timeoutMs / pollMs));
+  const nowMillis = options.nowMillis || Date.now;
+  return {
+    deadline: nowMillis() + timeoutMs,
+    nowMillis,
+    sleep: options.sleep || (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)))
+  };
+}
+
+function remainingAutocompleteMs(state) {
+  return Math.max(0, state.deadline - state.nowMillis());
+}
+
+async function waitForVisibleBeforeDeadline(locator, state) {
+  while (true) {
+    const visible = await firstVisibleLocator(locator);
+    if (visible) return visible;
+    const remaining = remainingAutocompleteMs(state);
+    if (remaining <= 0) return null;
+    await state.sleep(Math.min(100, remaining));
+  }
+}
+
+async function queryFreshAirportMatches(page, airport, state, knownDomReplacement = false) {
+  const pickupInput = await waitForVisibleBeforeDeadline(page.locator(SELECTORS.pickupInput), state);
+  if (!pickupInput || remainingAutocompleteMs(state) <= 0) return [];
+  await dismissPolishPopups(page, remainingAutocompleteMs(state));
+  if (remainingAutocompleteMs(state) <= 0) return [];
   const preQueryFingerprint = airportSuggestionFingerprint(await visibleAirportSuggestions(page));
-  await pickupInput.fill('');
-  await pickupInput.fill(airport.label || airport.iata);
-  let refreshObserved = false;
-  let matches = [];
-  for (let poll = 0; poll <= maximumPolls; poll += 1) {
+  await pickupInput.fill('', { timeout: remainingAutocompleteMs(state) });
+  await pickupInput.fill(airport.label || airport.iata, { timeout: remainingAutocompleteMs(state) });
+  let refreshObserved = knownDomReplacement;
+  while (true) {
     const suggestions = await visibleAirportSuggestions(page);
     refreshObserved ||= airportSuggestionFingerprint(suggestions) !== preQueryFingerprint;
-    matches = matchingAirportSuggestions(suggestions, airport);
-    if ((refreshObserved && matches.length > 0) || poll === maximumPolls) break;
-    await sleep(Math.min(pollMs, timeoutMs));
+    const matches = matchingAirportSuggestions(suggestions, airport);
+    if (refreshObserved && matches.length > 0) return matches;
+    const remaining = remainingAutocompleteMs(state);
+    if (remaining <= 0) return [];
+    await state.sleep(Math.min(100, remaining));
   }
-  if (!refreshObserved) return [];
-  return matchingAirportSuggestions(await visibleAirportSuggestions(page), airport);
+}
+
+async function resolveVisibleAirportMatches(page, airport, options = {}) {
+  return queryFreshAirportMatches(page, airport, autocompleteDeadline(options));
+}
+
+async function resolveSelectedAirportMatches(page, airport, options = {}) {
+  const state = autocompleteDeadline(options);
+  let matches = await queryFreshAirportMatches(page, airport, state);
+  if (matches.length !== 1) return matches;
+  let retried = false;
+  const dismissed = await dismissPolishPopups(page, remainingAutocompleteMs(state));
+  if (dismissed) {
+    retried = true;
+    matches = await queryFreshAirportMatches(page, airport, state, true);
+    if (matches.length !== 1) return matches;
+  }
+  let suggestion = matches[0];
+  try {
+    await suggestion.locator.click({ timeout: remainingAutocompleteMs(state) });
+  } catch (error) {
+    if (retried || remainingAutocompleteMs(state) <= 0) throw error;
+    await dismissPolishPopups(page, remainingAutocompleteMs(state));
+    retried = true;
+    matches = await queryFreshAirportMatches(page, airport, state, true);
+    if (matches.length !== 1) return matches;
+    suggestion = matches[0];
+    await suggestion.locator.click({ timeout: remainingAutocompleteMs(state) });
+  }
+  return [await readSelectedAirportIdentity(page, suggestion, remainingAutocompleteMs(state))];
 }
 
 async function selectVisibleAirport(page, airport, options) {
-  const matches = await resolveVisibleAirportMatches(page, airport, options);
+  const matches = await resolveSelectedAirportMatches(page, airport, options);
   if (matches.length === 0) throw controlledError('location_match_missing');
   if (matches.length !== 1) throw controlledError('location_match_ambiguous');
-  await matches[0].locator.click();
   return matches[0];
 }
 
@@ -689,7 +744,8 @@ class QeeqScraper {
       await dismissPolishPopups(page);
       await selectVisibleAirport(page, scenario.airport || {}, {
         timeoutMs: this.config.resultsTimeoutMs ?? 30000,
-        sleep: this.sleep
+        sleep: this.sleep,
+        nowMillis: () => new Date(this.now()).getTime()
       });
       await setSearchParameters(page, scenario, this.config);
       await dismissPolishPopups(page);
@@ -780,7 +836,7 @@ module.exports = {
   selectTopPublicOffers,
   shouldRetryScenario,
   snapshotOfferSubtree,
+  resolveSelectedAirportMatches,
   resolveVisibleAirportMatches,
-  selectAndReadAirportIdentity,
   visibleAirportSuggestions
 };
