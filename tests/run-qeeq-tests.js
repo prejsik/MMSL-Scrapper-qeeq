@@ -2976,3 +2976,24 @@ test('README documents safety gate outputs and verification commands', () => {
     assert.match(readme, new RegExp(required.replace('.', '\\.')));
   }
 });
+
+test('HTML redacts credential headers and QEEQ location identifiers in untrusted diagnostics', () => {
+  const { buildHtmlReport } = require('../src/qeeq/reportHtml');
+  const secrets = ['TOPSECRET', 'COOKIESECRET', 'CITYSECRET'];
+  const html = buildHtmlReport({
+    run_status: 'partial',
+    quality_status: 'warning',
+    quality: {
+      quality_errors: [
+        `Authorization: Bearer ${secrets[0]} Cookie: session=${secrets[1]} qeeq_city_id=${secrets[2]}`,
+        'location_id_drift'
+      ]
+    },
+    scenarios: []
+  });
+
+  for (const secret of secrets) assert.doesNotMatch(html, new RegExp(secret));
+  assert.doesNotMatch(html, /Authorization|Cookie|qeeq_city_id/i);
+  assert.match(html, /location_id_drift/);
+  assert.match(html, /\[redacted\]/);
+});

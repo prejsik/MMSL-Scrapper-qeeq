@@ -1,9 +1,10 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { rankVerifiedPublicOffers } = require('./utils');
+const { rankVerifiedPublicOffers, sanitizeDiagnosticText } = require('./utils');
 
 const STABLE_SEARCH_URL = 'https://www.qeeq.pl/car/search';
+const FORBIDDEN_DIAGNOSTIC = /(^|[?&#,;\s])(id|clid|_vv_|fpt|ticket|ts|qeeq_fpt|qeeq_city_id|qeeq_landmark_id|authorization|cookie)\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|[^&?#,;\s<>]+)/gi;
 
 function arrayOf(value) {
   return Array.isArray(value) ? value : [];
@@ -17,8 +18,9 @@ function isPlainObject(value) {
 
 function safeDiagnostic(value) {
   const text = typeof value === 'string' ? value : display(value);
-  return text.replace(/(^|[?&#,;\s])(id|clid|_vv_|fpt|ticket|ts|qeeq_fpt)\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|[^&?#,;\s<>]+)/gi,
-    (_, separator, field) => `${separator}${field}=[redacted]`);
+  return sanitizeDiagnosticText(text)
+    .replace(FORBIDDEN_DIAGNOSTIC, (_, separator, field) => `${separator}${field}=[redacted]`)
+    .replace(/\b(?:qeeq_city_id|qeeq_landmark_id|cookie|authorization)=\[redacted\]/gi, '[redacted]');
 }
 
 function escapeHtml(value) {
