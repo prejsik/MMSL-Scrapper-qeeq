@@ -2,10 +2,10 @@ const { normalizePriceCandidate, parseMoney, rankVerifiedPublicOffers } = requir
 
 function buildOfferBusinessKey(id, bid) {
   if (id === null || id === undefined || bid === null || bid === undefined) return null;
-  const normalizedId = String(id).trim();
-  const normalizedBid = String(bid).trim();
-  if (!normalizedId || !normalizedBid) return null;
-  return JSON.stringify([normalizedId, normalizedBid]);
+  const stringId = String(id);
+  const stringBid = String(bid);
+  if (!stringId.trim() || !stringBid.trim()) return null;
+  return JSON.stringify([stringId, stringBid]);
 }
 
 function canonicalProviderName(name) {

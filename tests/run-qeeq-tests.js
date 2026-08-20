@@ -508,3 +508,27 @@ test('duplicate exact-pair meals remain ambiguous when one shop name is blank', 
   assert.equal(record.price_verified, false);
   assert.deepEqual(record.quality_errors, ['provider_ambiguous']);
 });
+
+test('padded DOM business components do not match an unpadded API pair', () => {
+  const fixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { buildOfferBusinessKey, parseObservedListPayload, parseOfferSnapshot } = require('../src/qeeq/scraper');
+  const providers = parseObservedListPayload(apiFixture);
+  const context = { rentalDays: 2, vehicle: fixture.vehicle };
+  const publicSnapshot = { ...fixture.offer, displayedAmount: '119 zł', discountType: null, diamondAmount: null };
+  const canonicalKey = buildOfferBusinessKey(fixture.offer.businessId, fixture.offer.businessBid);
+  const snapshots = [
+    { ...publicSnapshot, businessId: ` ${fixture.offer.businessId} ` },
+    { ...publicSnapshot, businessBid: ` ${fixture.offer.businessBid} ` }
+  ];
+
+  for (const snapshot of snapshots) {
+    assert.notEqual(buildOfferBusinessKey(snapshot.businessId, snapshot.businessBid), canonicalKey);
+    const record = parseOfferSnapshot(snapshot, context, providers);
+    assert.equal(record.record_type, 'group');
+    assert.equal(record.provider_name, undefined);
+    assert.equal(record.total_price, undefined);
+    assert.equal(record.price_verified, false);
+    assert.deepEqual(record.quality_errors, ['provider_unresolved']);
+  }
+});
