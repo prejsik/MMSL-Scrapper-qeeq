@@ -1,5 +1,6 @@
 const apiFixture = require('./qeeq-search-list-ktw.json');
 const domFixture = require('./qeeq-expanded-group-ktw.json');
+const airportFixture = require('./qeeq-airport-autocomplete.json');
 
 const SELECTORS = {
   pickupInput: 'input[name="pickup"], .J-pick-up-input',
@@ -17,6 +18,7 @@ const SELECTORS = {
   residence: '.J-search-region-input',
   submit: '.J-search-submit',
   group: '[class*="car-group-item___"]',
+  openGroup: '[class*="car-group-item___"][class*="group-open___"]',
   vehicleName: '[class*="car_name___"]',
   supplierButton: 'button[class*="suppliers-btn"]',
   reserveAnchor: 'a[data-tj="reserve_btn_regular_click_b"]',
@@ -34,22 +36,52 @@ function createFakeQeeqBrowser(options = {}) {
     actions: [],
     browserLaunches: 0,
     contextsCreated: 0,
+    contextCloseAttempts: 0,
+    browserCloseAttempts: 0,
     selectedSuggestionIata: null,
     hiddenSearchValues: {},
     driverAge: null,
     residenceCountryCode: null,
     semanticLabelsUsed: [],
     loadMoreClicks: 0,
+    supplierButtonClicks: 0,
     submitted: false,
     responseListenerAttachedBeforeSubmit: false,
     observedRequestUrls: [],
     popupClicks: { optionalCookies: 0, lowerBanner: 0 },
+    responseListeners: 0,
     primaryProfileControls: options.primaryProfileControls !== false,
+    hiddenFirstControls: options.hiddenFirstControls === true,
     loadMoreCounts: options.loadMoreCounts || [25, 50, 50],
-    networkPayload: options.networkPayload || apiFixture,
-    networkUrl: options.networkUrl || 'https://www.qeeq.pl/car-api/search/list?page=1',
+    loadMoreDelayPolls: options.loadMoreDelayPolls || [],
+    currentGroupCount: (options.loadMoreCounts || [25, 50, 50])[0],
+    pendingGroupCount: null,
+    pendingGroupPolls: 0,
+    loadMoreDisappeared: false,
+    responseSequence: options.responseSequence || [{
+      payload: options.networkPayload || apiFixture,
+      url: options.networkUrl || 'https://www.qeeq.pl/car-api/search/list?page=1'
+    }],
     hiddenValueOverrides: options.hiddenValueOverrides || {},
-    failSessions: new Set(options.failSessions || [])
+    failSessions: new Set(options.failSessions || []),
+    pages: [],
+    clockMs: 0
+  };
+
+  state.now = () => new Date(1_700_000_000_000 + state.clockMs);
+  state.sleep = async milliseconds => {
+    state.clockMs += Number(milliseconds) || 0;
+    for (const page of state.pages) {
+      if (page.autocompletePollsRemaining > 0) page.autocompletePollsRemaining -= 1;
+      if (page.expansionPollsRemaining > 0) page.expansionPollsRemaining -= 1;
+    }
+    if (state.pendingGroupPolls > 0) {
+      state.pendingGroupPolls -= 1;
+      if (state.pendingGroupPolls === 0 && state.pendingGroupCount !== null) {
+        state.currentGroupCount = state.pendingGroupCount;
+        state.pendingGroupCount = null;
+      }
+    }
   };
 
   class FakeLocator {
@@ -60,22 +92,30 @@ function createFakeQeeqBrowser(options = {}) {
     }
 
     async count() {
-      if (this.kind === 'suggestions') return 2;
-      if (this.kind === 'popup') return this.page.popups[this.data.label] ? 1 : 0;
-      if (this.kind === 'loadMore') return state.loadMoreClicks < state.loadMoreCounts.length - 1 ? 1 : 0;
-      if (this.kind === 'profile') return state.primaryProfileControls ? 1 : 0;
-      if (this.kind === 'semanticProfile') return state.primaryProfileControls ? 0 : 1;
-      if (this.kind === 'groups') return state.loadMoreCounts[Math.min(state.loadMoreClicks, state.loadMoreCounts.length - 1)];
+      const terminalLoadMoreStall = state.loadMoreClicks >= state.loadMoreCounts.length - 1
+        && state.loadMoreCounts.length > 1
+        && state.loadMoreCounts.at(-1) === state.loadMoreCounts.at(-2);
+      if (this.kind === 'suggestions') return this.page.suggestions().length;
+      if (this.kind === 'popup') return this.page.popups[this.data.label] ? (state.hiddenFirstControls ? 2 : 1) : 0;
+      if (this.kind === 'loadMore') return !state.loadMoreDisappeared && (state.pendingGroupCount !== null || state.loadMoreClicks < state.loadMoreCounts.length - 1 || terminalLoadMoreStall) ? 1 : 0;
+      if (this.kind === 'profile') return state.primaryProfileControls ? (state.hiddenFirstControls ? 2 : 1) : 0;
+      if (this.kind === 'semanticProfile') return state.primaryProfileControls ? 0 : (state.hiddenFirstControls ? 2 : 1);
+      if (this.kind === 'groups') return state.currentGroupCount;
       if (this.kind === 'supplierButton') return this.data.index === 0 ? 1 : 0;
-      if (this.kind === 'reserveAnchor') return this.data.index === 0 && this.page.expanded ? 1 : 0;
+      if (this.kind === 'reserveAnchor') return this.data.index === 0 && this.page.groupOpen ? 1 : 0;
       if (this.kind === 'referencePrice') return 0;
       return 1;
     }
 
     async isVisible() {
+      const terminalLoadMoreStall = state.loadMoreClicks >= state.loadMoreCounts.length - 1
+        && state.loadMoreCounts.length > 1
+        && state.loadMoreCounts.at(-1) === state.loadMoreCounts.at(-2);
       if (this.kind === 'suggestion') return this.data.visible;
+      if (['popup', 'profile', 'semanticProfile'].includes(this.kind) && state.hiddenFirstControls && this.data.index === 0) return false;
       if (this.kind === 'popup') return Boolean(this.page.popups[this.data.label]);
-      if (this.kind === 'loadMore') return state.loadMoreClicks < state.loadMoreCounts.length - 1;
+      if (this.kind === 'loadMore') return !state.loadMoreDisappeared && (state.pendingGroupCount !== null || state.loadMoreClicks < state.loadMoreCounts.length - 1 || terminalLoadMoreStall);
+      if (this.kind === 'reserveAnchor') return (await this.count()) > 0 && this.page.expansionPollsRemaining === 0;
       return (await this.count()) > 0;
     }
 
@@ -85,9 +125,7 @@ function createFakeQeeqBrowser(options = {}) {
 
     nth(index) {
       if (this.kind === 'suggestions') {
-        return new FakeLocator(this.page, 'suggestion', index === 0
-          ? { visible: false, iata: 'WRO', label: 'Lotnisko we Wrocławiu' }
-          : { visible: true, iata: 'KTW', label: 'Port Lotniczy Katowice-Pyrzowice' });
+        return new FakeLocator(this.page, 'suggestion', this.page.suggestions()[index]);
       }
       if (this.kind === 'groups') return new FakeLocator(this.page, 'group', { index });
       return new FakeLocator(this.page, this.kind, { ...this.data, index });
@@ -110,6 +148,10 @@ function createFakeQeeqBrowser(options = {}) {
 
     async fill(value) {
       state.actions.push(['fill', this.kind, value]);
+      if (this.kind === 'pickupInput') {
+        this.page.pickupQuery = value;
+        this.page.autocompletePollsRemaining = options.autocompleteDelayPolls || 0;
+      }
       if (this.kind === 'dateOrTime') {
         const hiddenName = this.data.hiddenName;
         state.hiddenSearchValues[hiddenName] = state.hiddenValueOverrides[hiddenName] ?? value;
@@ -132,8 +174,23 @@ function createFakeQeeqBrowser(options = {}) {
         if (this.data.label === 'Odrzuć nieobowiązkowe pliki cookie') state.popupClicks.optionalCookies += 1;
         if (this.data.label === 'OK') state.popupClicks.lowerBanner += 1;
       }
-      if (this.kind === 'supplierButton') this.page.expanded = true;
-      if (this.kind === 'loadMore') state.loadMoreClicks += 1;
+      if (this.kind === 'supplierButton') {
+        state.supplierButtonClicks += 1;
+        this.page.groupOpen = true;
+        this.page.expansionPollsRemaining = options.expansionDelayPolls || 0;
+      }
+      if (this.kind === 'loadMore') {
+        state.loadMoreClicks += 1;
+        const nextCount = state.loadMoreCounts[Math.min(state.loadMoreClicks, state.loadMoreCounts.length - 1)];
+        const delay = state.loadMoreDelayPolls[state.loadMoreClicks - 1] || 0;
+        if (delay > 0) {
+          state.pendingGroupCount = nextCount;
+          state.pendingGroupPolls = delay;
+        } else {
+          state.currentGroupCount = nextCount;
+        }
+        if (options.loadMoreDisappearsAfterClick === state.loadMoreClicks) state.loadMoreDisappeared = true;
+      }
       if (this.kind === 'sameLocation') this.page.sameLocation = true;
       if (this.kind === 'submit') await this.page.submit();
     }
@@ -168,13 +225,23 @@ function createFakeQeeqBrowser(options = {}) {
       if (this.kind === 'suggestion') {
         if (name === 'data-iata') return this.data.iata;
         if (name === 'title') return this.data.label;
+        if (name === 'data-city') return this.data.city || null;
+        if (name === 'data-landmark') return this.data.landmark || null;
+        if (name === 'data-data-type') return this.data.dataType || null;
+        if (name === 'type') return this.data.type || null;
       }
+      if (this.kind === 'group' && name === 'class') return this.page.groupOpen && this.data.index === 0 ? 'car-group-item___x group-open___x' : 'car-group-item___x';
       if (this.kind === 'reserveAnchor') {
         if (name === 'id') return domFixture.offer.businessId;
         if (name === 'bid') return domFixture.offer.businessBid;
         if (name === 'list_discount_type') return domFixture.offer.discountType;
       }
       return null;
+    }
+
+    async evaluate(_callback, selector) {
+      if (this.kind === 'group' && selector === SELECTORS.openGroup) return this.page.groupOpen && this.data.index === 0;
+      return false;
     }
   }
 
@@ -184,11 +251,30 @@ function createFakeQeeqBrowser(options = {}) {
       this.listeners = new Map();
       this.currentUrl = 'about:blank';
       this.sameLocation = false;
-      this.expanded = false;
+      this.groupOpen = options.initiallyOpen === true;
+      this.expansionPollsRemaining = 0;
+      this.pickupQuery = '';
+      this.autocompletePollsRemaining = 0;
       this.popups = {
         'Odrzuć nieobowiązkowe pliki cookie': true,
         OK: true
       };
+      state.pages.push(this);
+    }
+
+    suggestions() {
+      const stale = { visible: false, iata: 'WRO', label: 'Lotnisko we Wrocławiu' };
+      if (this.autocompletePollsRemaining > 0) return [stale];
+      const queryIata = String(this.pickupQuery || '').trim().toUpperCase();
+      const normalizedQuery = String(this.pickupQuery || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      const fixtureMatch = airportFixture.find(item => item.iata === queryIata)
+        || airportFixture.find(item => item.label.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() === normalizedQuery);
+      const current = fixtureMatch || airportFixture.find(item => item.iata === 'KTW');
+      const override = options.autocompleteOverrides?.[current.iata];
+      if (override === 'missing') return [stale];
+      const visible = { ...current, visible: true };
+      if (override === 'ambiguous') return [stale, visible, { ...visible }];
+      return [stale, visible];
     }
 
     async goto(url) {
@@ -223,6 +309,7 @@ function createFakeQeeqBrowser(options = {}) {
       if (selector === SELECTORS.residence) return new FakeLocator(this, 'profile', { field: 'residenceCountryCode' });
       if (selector === SELECTORS.submit) return new FakeLocator(this, 'submit');
       if (selector === SELECTORS.group) return new FakeLocator(this, 'groups');
+      if (selector === SELECTORS.openGroup) return new FakeLocator(this, 'openGroups');
       return new FakeLocator(this, 'unknown', { selector });
     }
 
@@ -240,23 +327,36 @@ function createFakeQeeqBrowser(options = {}) {
       const handlers = this.listeners.get(event) || [];
       handlers.push(handler);
       this.listeners.set(event, handlers);
+      state.responseListeners = handlers.length;
     }
 
     off(event, handler) {
       const handlers = this.listeners.get(event) || [];
       this.listeners.set(event, handlers.filter(candidate => candidate !== handler));
+      state.responseListeners = this.listeners.get(event).length;
     }
 
     async submit() {
       state.submitted = true;
       state.responseListenerAttachedBeforeSubmit = (this.listeners.get('response') || []).length > 0;
-      state.observedRequestUrls.push(state.networkUrl);
-      const response = {
-        url: () => state.networkUrl,
-        request: () => ({ method: () => 'GET' }),
-        json: async () => state.networkPayload
+      const emit = entry => {
+        state.observedRequestUrls.push(entry.url);
+        const response = {
+          url: () => entry.url,
+          request: () => ({ method: () => 'GET' }),
+          json: async () => {
+            state.clockMs += entry.jsonCostMs || 0;
+            if (entry.jsonDelayMs) await new Promise(resolve => setTimeout(resolve, entry.jsonDelayMs));
+            if (entry.jsonError) throw new Error('fake response parse failure');
+            return entry.payload;
+          }
+        };
+        for (const handler of this.listeners.get('response') || []) handler(response);
       };
-      for (const handler of this.listeners.get('response') || []) handler(response);
+      for (const entry of state.responseSequence) {
+        if (entry.emitDelayMs) setTimeout(() => emit(entry), entry.emitDelayMs);
+        else emit(entry);
+      }
       const resultUrl = new URL('https://www.qeeq.pl/car/search');
       resultUrl.searchParams.set('id', 'fake-session');
       this.currentUrl = resultUrl.toString();
@@ -279,9 +379,26 @@ function createFakeQeeqBrowser(options = {}) {
       newContext: async () => {
         state.contextsCreated += 1;
         const page = new FakePage(state.contextsCreated);
-        return { newPage: async () => page, close: async () => {} };
+        return {
+          newPage: async () => page,
+          close: async () => {
+            state.contextCloseAttempts += 1;
+            if (options.contextCloseError) {
+              const error = new Error(options.contextCloseError);
+              error.code = options.contextCloseError;
+              throw error;
+            }
+          }
+        };
       },
-      close: async () => {}
+      close: async () => {
+        state.browserCloseAttempts += 1;
+        if (options.browserCloseError) {
+          const error = new Error(options.browserCloseError);
+          error.code = options.browserCloseError;
+          throw error;
+        }
+      }
     };
   };
 

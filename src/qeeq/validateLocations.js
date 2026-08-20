@@ -1,8 +1,9 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { randomUUID } = require('node:crypto');
 
 const { compareLiveAirport, locationCatalog } = require('./locations');
-const { SELECTORS, dismissPolishPopups, visibleAirportSuggestions } = require('./scraper');
+const { closeBrowserResources, dismissPolishPopups, resolveVisibleAirportMatches } = require('./scraper');
 
 async function launchDefaultBrowser(config) {
   const { chromium } = require('playwright');
@@ -24,8 +25,11 @@ function publicSuggestion(suggestion) {
 
 async function withBrowserResolver(config, deps, validate) {
   const launchBrowser = deps.launchBrowser || (() => launchDefaultBrowser(config));
+  const sleep = deps.sleep || (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)));
   const browser = await launchBrowser();
   let context;
+  let result;
+  let operationError = null;
   try {
     context = await browser.newContext({ locale: 'pl-PL', timezoneId: config.timeZone || 'Europe/Warsaw' });
     const page = await context.newPage();
@@ -36,16 +40,18 @@ async function withBrowserResolver(config, deps, validate) {
     });
     await dismissPolishPopups(page);
     const resolveAirport = async airport => {
-      await page.locator(SELECTORS.pickupInput).fill(airport.iata);
-      return (await visibleAirportSuggestions(page))
-        .filter(item => item.iata === airport.iata)
+      return (await resolveVisibleAirportMatches(page, airport, {
+        timeoutMs: config.resultsTimeoutMs ?? 30000,
+        sleep
+      }))
         .map(publicSuggestion);
     };
-    return await validate(resolveAirport);
-  } finally {
-    await context?.close();
-    await browser.close();
+    result = await validate(resolveAirport);
+  } catch (error) {
+    operationError = error;
   }
+  await closeBrowserResources(context, browser, operationError);
+  return result;
 }
 
 async function validateLiveLocationCatalog(config = {}, deps = {}) {
@@ -140,10 +146,14 @@ function parseArgs(argv) {
 
 function writeAtomicJson(outputPath, value) {
   const absolutePath = path.resolve(outputPath);
-  const temporaryPath = `${absolutePath}.tmp`;
+  const temporaryPath = `${absolutePath}.${process.pid}.${randomUUID()}.tmp`;
   fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
-  fs.writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  fs.renameSync(temporaryPath, absolutePath);
+  try {
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    fs.renameSync(temporaryPath, absolutePath);
+  } finally {
+    if (fs.existsSync(temporaryPath)) fs.rmSync(temporaryPath, { force: true });
+  }
 }
 
 async function main(argv = process.argv.slice(2)) {

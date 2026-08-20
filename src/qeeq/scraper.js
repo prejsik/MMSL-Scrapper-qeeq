@@ -1,4 +1,5 @@
 const { normalizePriceCandidate, parseMoney, rankVerifiedPublicOffers, sanitizeSourceUrl } = require('./utils');
+const { normalizeLocationKey } = require('./locations');
 
 const SELECTORS = Object.freeze({
   pickupInput: 'input[name="pickup"], .J-pick-up-input',
@@ -51,15 +52,21 @@ function controlledError(code) {
   return error;
 }
 
-async function locatorExists(locator) {
-  if (!locator || await locator.count() === 0) return false;
-  return locator.first().isVisible();
+async function firstVisibleLocator(locator) {
+  if (!locator) return null;
+  const count = await locator.count();
+  for (let index = 0; index < count; index += 1) {
+    const candidate = locator.nth(index);
+    if (await candidate.isVisible()) return candidate;
+  }
+  return null;
 }
 
 async function dismissPolishPopups(page) {
   for (const label of ['Odrzuć nieobowiązkowe pliki cookie', 'OK']) {
     const control = page.getByText(label, { exact: true });
-    if (await locatorExists(control)) await control.first().click();
+    const visibleControl = await firstVisibleLocator(control);
+    if (visibleControl) await visibleControl.click();
   }
 }
 
@@ -91,14 +98,32 @@ async function visibleAirportSuggestions(page) {
   return values;
 }
 
-async function selectVisibleAirport(page, airport) {
-  await page.locator(SELECTORS.pickupInput).fill(airport.label || airport.iata);
+function matchingAirportSuggestions(suggestions, airport) {
   const expectedIata = normalizeText(airport.iata).toUpperCase();
-  const expectedLabel = normalizeText(airport.label).toLocaleLowerCase('pl-PL');
-  const matches = (await visibleAirportSuggestions(page)).filter(item => {
+  const expectedLabel = normalizeLocationKey(airport.label);
+  return suggestions.filter(item => {
     if (item.iata !== expectedIata) return false;
-    return !expectedLabel || item.label.toLocaleLowerCase('pl-PL') === expectedLabel;
+    return !expectedLabel || normalizeLocationKey(item.label) === expectedLabel;
   });
+}
+
+async function resolveVisibleAirportMatches(page, airport, options = {}) {
+  await page.locator(SELECTORS.pickupInput).fill(airport.label || airport.iata);
+  const timeoutMs = options.timeoutMs ?? 30000;
+  const sleep = options.sleep || (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)));
+  const pollMs = 100;
+  const maximumPolls = Math.max(1, Math.ceil(timeoutMs / pollMs));
+  let matches = [];
+  for (let poll = 0; poll <= maximumPolls; poll += 1) {
+    matches = matchingAirportSuggestions(await visibleAirportSuggestions(page), airport);
+    if (matches.length > 0 || poll === maximumPolls) break;
+    await sleep(Math.min(pollMs, timeoutMs));
+  }
+  return matchingAirportSuggestions(await visibleAirportSuggestions(page), airport);
+}
+
+async function selectVisibleAirport(page, airport, options) {
+  const matches = await resolveVisibleAirportMatches(page, airport, options);
   if (matches.length === 0) throw controlledError('location_match_missing');
   if (matches.length !== 1) throw controlledError('location_match_ambiguous');
   await matches[0].locator.click();
@@ -107,7 +132,7 @@ async function selectVisibleAirport(page, airport) {
 
 function snapshotOfferSubtree(input = {}) {
   const featureTexts = Array.isArray(input.featureTexts) ? input.featureTexts.map(normalizeText).filter(Boolean) : [];
-  const ratingSource = normalizeText(input.supplierRatingText || input.supplierInfoText);
+  const ratingSource = normalizeText(input.supplierRatingText);
   const ratingMatch = /(\d+(?:[.,]\d+)?)\s*\(\s*(\d+)\s*\)/.exec(ratingSource);
   const numberForLabel = label => {
     const match = featureTexts.map(text => [text, new RegExp(`(\\d+)\\s+${label}`, 'i').exec(text)]).find(([, result]) => result);
@@ -303,8 +328,9 @@ function errorCodeFor(error) {
 
 async function setProfileControl(page, primarySelector, label, value) {
   const primary = page.locator(primarySelector);
-  const control = await locatorExists(primary) ? primary.first() : page.getByLabel(label, { exact: true }).first();
-  if (!await locatorExists(control)) throw controlledError('search_parameter_mismatch');
+  const control = await firstVisibleLocator(primary)
+    || await firstVisibleLocator(page.getByLabel(label, { exact: true }));
+  if (!control) throw controlledError('search_parameter_mismatch');
   try {
     await control.selectOption(value);
   } catch {
@@ -326,7 +352,8 @@ async function setSearchParameters(page, scenario, config) {
     if (actual !== expected) throw controlledError('search_parameter_mismatch');
   }
   const sameLocation = page.locator(SELECTORS.sameLocation);
-  if (await locatorExists(sameLocation) && !await sameLocation.first().isChecked()) await sameLocation.first().click();
+  const visibleSameLocation = await firstVisibleLocator(sameLocation);
+  if (visibleSameLocation && !await visibleSameLocation.isChecked()) await visibleSameLocation.click();
   await setProfileControl(page, SELECTORS.driverAge, 'Wiek kierowcy', config.driverAge);
   await setProfileControl(page, SELECTORS.residence, 'Kraj zamieszkania', config.residenceCountryCode);
 }
@@ -358,32 +385,44 @@ function withTimeout(promise, timeoutMs) {
     .finally(() => clearTimeout(timer));
 }
 
-function observeListResponses(page) {
+function observeListResponses(page, timeoutMs, nowMillis = Date.now) {
   const responses = [];
   const waiters = [];
+  let detached = false;
+  const deadline = nowMillis() + timeoutMs;
   const listener = response => {
     if (!isObservedListResponse(response)) return;
     responses.push(response);
     while (waiters.length) waiters.shift()();
   };
   page.on('response', listener);
+  const dispose = () => {
+    if (detached) return;
+    detached = true;
+    page.off?.('response', listener);
+  };
   return {
-    async finish(timeoutMs) {
+    async finish() {
       const qualityErrors = [];
       let payload = null;
+      let responseIndex = 0;
       try {
-        if (responses.length === 0) {
-          const observation = await withTimeout(new Promise(resolve => waiters.push(resolve)), timeoutMs);
-          if (typeof observation === 'symbol') return { payload, qualityErrors };
-        }
-        for (const response of responses) {
+        while (nowMillis() < deadline) {
+          if (responseIndex >= responses.length) {
+            const remaining = deadline - nowMillis();
+            const observation = await withTimeout(new Promise(resolve => waiters.push(resolve)), remaining);
+            if (typeof observation === 'symbol') break;
+            continue;
+          }
+          const response = responses[responseIndex];
+          responseIndex += 1;
           let candidate;
           try {
-            candidate = await withTimeout(response.json(), timeoutMs);
+            candidate = await withTimeout(response.json(), deadline - nowMillis());
           } catch {
             candidate = null;
           }
-          if (typeof candidate === 'symbol') break;
+          if (typeof candidate === 'symbol' || nowMillis() >= deadline) break;
           if (supportedListPayload(candidate)) {
             payload = candidate;
             break;
@@ -391,24 +430,25 @@ function observeListResponses(page) {
           qualityErrors.push('network_schema_unrecognized');
         }
       } finally {
-        page.off?.('response', listener);
+        dispose();
       }
       return { payload, qualityErrors: [...new Set(qualityErrors)] };
-    }
+    },
+    dispose
   };
 }
 
 async function locatorText(locator) {
-  return await locatorExists(locator) ? normalizeText(await locator.first().innerText()) : null;
+  const visible = await firstVisibleLocator(locator);
+  return visible ? normalizeText(await visible.innerText()) : null;
 }
 
 async function readOfferSnapshot(anchor) {
-  const subtree = anchor.locator(OFFER_ANCESTOR).first();
-  if (!await locatorExists(subtree)) return null;
+  const subtree = await firstVisibleLocator(anchor.locator(OFFER_ANCESTOR));
+  if (!subtree) return null;
   const featureTexts = await subtree.locator(SELECTORS.feature).allTextContents();
   return {
     ...snapshotOfferSubtree({
-      supplierInfoText: await locatorText(subtree.locator(SELECTORS.supplierInfo)),
       supplierRatingText: await locatorText(subtree.locator(SELECTORS.supplierRating)),
       featureTexts,
       priceText: await locatorText(subtree.locator(SELECTORS.displayedPrice)),
@@ -422,27 +462,59 @@ async function readOfferSnapshot(anchor) {
   };
 }
 
+async function pollForVisible(locator, timeoutMs, sleep) {
+  const pollMs = 100;
+  const maximumPolls = Math.max(1, Math.ceil(timeoutMs / pollMs));
+  for (let poll = 0; poll <= maximumPolls; poll += 1) {
+    const visible = await firstVisibleLocator(locator);
+    if (visible) return visible;
+    if (poll < maximumPolls) await sleep(Math.min(pollMs, timeoutMs));
+  }
+  return null;
+}
+
 async function expandAllResults(page, config, sleep) {
   const qualityErrors = [];
   const groups = page.locator(SELECTORS.group);
   const maximumIterations = config.maxLoadMoreIterations ?? 20;
+  const groupLimit = config.maxVehicleGroupsPerScenario ?? 300;
+  const timeoutMs = config.resultsTimeoutMs ?? 30000;
   for (let iteration = 0; iteration < maximumIterations; iteration += 1) {
     const button = page.getByText(SELECTORS.loadMoreText, { exact: true });
-    if (!await locatorExists(button)) return qualityErrors;
     const before = await groups.count();
-    await button.first().click();
-    await sleep(100);
-    const after = await groups.count();
-    if (after <= before) {
+    const visibleButton = await firstVisibleLocator(button);
+    if (!visibleButton) return qualityErrors;
+    if (before >= groupLimit) {
+      qualityErrors.push('vehicle_group_limit_reached');
+      return qualityErrors;
+    }
+    await visibleButton.click();
+
+    const pollMs = 100;
+    const maximumPolls = Math.max(1, Math.ceil(timeoutMs / pollMs));
+    let progressed = false;
+    for (let poll = 0; poll <= maximumPolls; poll += 1) {
+      const after = await groups.count();
+      if (after > before || !await firstVisibleLocator(button)) {
+        progressed = true;
+        break;
+      }
+      if (poll < maximumPolls) await sleep(Math.min(pollMs, timeoutMs));
+    }
+    if (!progressed) {
       qualityErrors.push('load_more_stalled');
       return qualityErrors;
     }
+    if (await groups.count() >= groupLimit && await firstVisibleLocator(button)) {
+      qualityErrors.push('vehicle_group_limit_reached');
+      return qualityErrors;
+    }
   }
-  if (await locatorExists(page.getByText(SELECTORS.loadMoreText, { exact: true }))) qualityErrors.push('load_more_limit_reached');
+  if (await firstVisibleLocator(page.getByText(SELECTORS.loadMoreText, { exact: true }))) qualityErrors.push('load_more_limit_reached');
   return qualityErrors;
 }
 
-async function extractResults(page, scenario, config, providerMetadata, sourceSearchUrl, capturedAt) {
+async function extractResults(page, scenario, config, providerMetadata, sourceSearchUrl, capturedAt, sleep) {
   const groups = [];
   const offers = [];
   const groupLocators = page.locator(SELECTORS.group);
@@ -457,15 +529,31 @@ async function extractResults(page, scenario, config, providerMetadata, sourceSe
     const supplierButton = groupLocator.locator(SELECTORS.supplierButton);
     let vehicle = { vehicleName, transmission: null, seats: null, doors: null, luggage: null };
     let diagnostic = parseGroupSnapshot(vehicle, scenario);
-    if (await locatorExists(supplierButton)) await supplierButton.first().click();
+    const isOpen = await groupLocator.evaluate((element, selector) => element.matches(selector), SELECTORS.openGroup);
+    if (!isOpen) {
+      const visibleSupplierButton = await firstVisibleLocator(supplierButton);
+      if (!visibleSupplierButton) {
+        groups.push(diagnostic);
+        continue;
+      }
+      await visibleSupplierButton.click();
+    }
 
     const anchors = groupLocator.locator(SELECTORS.reserveAnchor);
+    if (!await pollForVisible(anchors, config.resultsTimeoutMs ?? 30000, sleep)) {
+      diagnostic = { ...diagnostic, quality_errors: ['group_expansion_timeout'] };
+      qualityErrors.push('group_expansion_timeout');
+      groups.push(diagnostic);
+      continue;
+    }
     for (let offerIndex = 0; offerIndex < await anchors.count(); offerIndex += 1) {
+      const anchor = anchors.nth(offerIndex);
+      if (!await anchor.isVisible()) continue;
       if (offers.length >= offerLimit) {
         qualityErrors.push('offer_limit_reached');
         break;
       }
-      const snapshot = await readOfferSnapshot(anchors.nth(offerIndex));
+      const snapshot = await readOfferSnapshot(anchor);
       if (!snapshot) continue;
       vehicle = {
         vehicleName,
@@ -496,6 +584,22 @@ async function defaultLaunchBrowser(config) {
   return chromium.launch(options);
 }
 
+async function closeBrowserResources(context, browser, primaryError = null) {
+  let cleanupError = null;
+  try {
+    await context?.close();
+  } catch (error) {
+    cleanupError = error;
+  }
+  try {
+    await browser?.close();
+  } catch (error) {
+    cleanupError ||= error;
+  }
+  if (primaryError) throw primaryError;
+  if (cleanupError) throw cleanupError;
+}
+
 class QeeqScraper {
   constructor(config, deps = {}) {
     const unsupported = Object.keys(deps).filter(name => !['launchBrowser', 'now', 'sleep'].includes(name));
@@ -509,6 +613,9 @@ class QeeqScraper {
   async runAttempt(scenario, attempt) {
     let browser;
     let context;
+    let observation;
+    let result;
+    let operationError = null;
     try {
       browser = await this.launchBrowser();
       context = await browser.newContext({ locale: 'pl-PL', timezoneId: this.config.timeZone || 'Europe/Warsaw' });
@@ -519,22 +626,29 @@ class QeeqScraper {
         timeout: this.config.navigationTimeoutMs ?? 60000
       });
       await dismissPolishPopups(page);
-      await selectVisibleAirport(page, scenario.airport || {});
+      await selectVisibleAirport(page, scenario.airport || {}, {
+        timeoutMs: this.config.resultsTimeoutMs ?? 30000,
+        sleep: this.sleep
+      });
       await setSearchParameters(page, scenario, this.config);
       await dismissPolishPopups(page);
 
-      const observation = observeListResponses(page);
+      observation = observeListResponses(
+        page,
+        this.config.apiObservationTimeoutMs ?? 30000,
+        () => new Date(this.now()).getTime()
+      );
       await page.locator(SELECTORS.submit).click();
       await page.waitForURL(/\/car\/search\?id=/, { timeout: this.config.resultsTimeoutMs ?? 60000 });
       await page.waitForSelector(SELECTORS.group, { timeout: this.config.resultsTimeoutMs ?? 60000 });
       const sourceSearchUrl = sanitizeSourceUrl(page.url());
-      const observed = await observation.finish(this.config.apiObservationTimeoutMs ?? 30000);
+      const observed = await observation.finish();
       const providerMetadata = observed.payload ? parseObservedListPayload(observed.payload) : new Map();
       const qualityErrors = [...observed.qualityErrors, ...await expandAllResults(page, this.config, this.sleep)];
       const capturedAt = new Date(this.now()).toISOString();
-      const extracted = await extractResults(page, scenario, this.config, providerMetadata, sourceSearchUrl, capturedAt);
+      const extracted = await extractResults(page, scenario, this.config, providerMetadata, sourceSearchUrl, capturedAt, this.sleep);
       qualityErrors.push(...extracted.qualityErrors);
-      return {
+      result = {
         key: scenario.key,
         status: 'success',
         attempt,
@@ -545,10 +659,16 @@ class QeeqScraper {
         source_search_url: sourceSearchUrl,
         captured_at: capturedAt
       };
-    } finally {
-      await context?.close();
-      await browser?.close();
+    } catch (error) {
+      operationError = error;
     }
+    try {
+      observation?.dispose();
+    } catch (error) {
+      operationError ||= error;
+    }
+    await closeBrowserResources(context, browser, operationError);
+    return result;
   }
 
   async runScenario(scenario) {
@@ -587,6 +707,7 @@ module.exports = {
   SELECTORS,
   QeeqScraper,
   buildOfferBusinessKey,
+  closeBrowserResources,
   dismissPolishPopups,
   parseObservedListPayload,
   resolveProviderForOffer,
@@ -595,5 +716,6 @@ module.exports = {
   selectTopPublicOffers,
   shouldRetryScenario,
   snapshotOfferSubtree,
+  resolveVisibleAirportMatches,
   visibleAirportSuggestions
 };

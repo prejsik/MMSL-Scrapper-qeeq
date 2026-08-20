@@ -580,6 +580,7 @@ test('offer fields are read only from the expanded provider subtree', () => {
   const { snapshotOfferSubtree } = require('../src/qeeq/scraper');
   const snapshot = snapshotOfferSubtree({
     supplierInfoText: 'CARWIZ 8.5 (120)',
+    supplierRatingText: '8.5 (120)',
     featureTexts: ['Automatyczna', 'Depozyt: 3 399,99 zł', '5 miejsc', '5 drzwi', '1 bagaż'],
     priceText: '106 zł', periodText: 'łącznie za 2 dni',
     outsideSidebarText: 'Kaucja poniżej 3 000 zł Ocena 8+'
@@ -637,7 +638,7 @@ test('unknown network schema falls back to scoped DOM with a quality error', asy
   const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
   const { QeeqScraper } = require('../src/qeeq/scraper');
   const fake = createFakeQeeqBrowser({ networkPayload: { changed: true } });
-  const scraper = new QeeqScraper({ baseUrl: 'https://www.qeeq.pl', driverAge: '30-60', residenceCountryCode: 'PL' }, { launchBrowser: fake.launchBrowser, sleep: async () => {} });
+  const scraper = new QeeqScraper({ baseUrl: 'https://www.qeeq.pl', driverAge: '30-60', residenceCountryCode: 'PL', apiObservationTimeoutMs: 10 }, { launchBrowser: fake.launchBrowser, sleep: async () => {} });
   const outcome = await scraper.runScenario({ key: 'ktw|2026-09-19|2', airport: { iata: 'KTW' }, pickupDate: '2026-09-19', pickupTime: '10:00', dropoffDate: '2026-09-21', dropoffTime: '10:00', rentalDays: 2 });
   assert.equal(outcome.quality_errors.includes('network_schema_unrecognized'), true);
   assert.equal(outcome.groups.length > 0, true);
@@ -698,4 +699,233 @@ test('location validator rejects missing current QEEQ IDs', async () => {
   });
   assert.equal(result.validation_status, 'fail');
   assert.equal(result.airports.find(item => item.iata === 'KTW').error_code, 'location_id_missing');
+});
+
+function task5Scenario() {
+  return {
+    key: 'ktw|2026-09-19|2',
+    airport: { iata: 'KTW', label: 'Port Lotniczy Katowice-Pyrzowice' },
+    pickupDate: '2026-09-19', pickupTime: '10:00',
+    dropoffDate: '2026-09-21', dropoffTime: '10:00', rentalDays: 2
+  };
+}
+
+function task5Config(overrides = {}) {
+  return {
+    baseUrl: 'https://www.qeeq.pl', timeZone: 'Europe/Warsaw',
+    driverAge: '30-60', residenceCountryCode: 'PL',
+    navigationTimeoutMs: 300, resultsTimeoutMs: 300, apiObservationTimeoutMs: 100,
+    maxLoadMoreIterations: 20, maxVehicleGroupsPerScenario: 300, maxOffersPerScenario: 1500,
+    ...overrides
+  };
+}
+
+test('rating never falls back outside the scoped supplier-rating locator', () => {
+  const { snapshotOfferSubtree } = require('../src/qeeq/scraper');
+  const snapshot = snapshotOfferSubtree({
+    supplierRatingText: '',
+    supplierInfoText: 'CARWIZ 9.9 (999)',
+    outsideSidebarText: 'Ocena 8.8 (888)'
+  });
+  assert.equal(snapshot.ratingText, null);
+  assert.equal(snapshot.ratingCountText, null);
+});
+
+test('scraper polls past stale autocomplete before selecting a fresh exact match', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({ autocompleteDelayPolls: 2 });
+  const outcome = await new QeeqScraper(task5Config(), { launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep }).runScenario(task5Scenario());
+  assert.equal(outcome.status, 'success');
+  assert.equal(fake.selectedSuggestionIata, 'KTW');
+  assert.equal(fake.clockMs >= 200, true);
+});
+
+test('scraper bounds missing autocomplete polling and rejects ambiguous fresh matches', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const missing = createFakeQeeqBrowser({ autocompleteOverrides: { KTW: 'missing' } });
+  const missingOutcome = await new QeeqScraper(task5Config({ resultsTimeoutMs: 200 }), { launchBrowser: missing.launchBrowser, now: missing.now, sleep: missing.sleep }).runScenario(task5Scenario());
+  assert.equal(missingOutcome.error_code, 'location_match_missing');
+  assert.equal(missing.clockMs >= 200, true);
+
+  const ambiguous = createFakeQeeqBrowser({ autocompleteOverrides: { KTW: 'ambiguous' } });
+  const ambiguousOutcome = await new QeeqScraper(task5Config(), { launchBrowser: ambiguous.launchBrowser, now: ambiguous.now, sleep: ambiguous.sleep }).runScenario(task5Scenario());
+  assert.equal(ambiguousOutcome.error_code, 'location_match_ambiguous');
+});
+
+test('browser-backed validator polls fresh suggestions and never submits', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { validateLiveLocationCatalog } = require('../src/qeeq/validateLocations');
+  const fake = createFakeQeeqBrowser({ autocompleteDelayPolls: 1 });
+  const result = await validateLiveLocationCatalog(task5Config(), { launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep });
+  assert.equal(result.validation_status, 'pass');
+  assert.equal(result.validated_airports, 9);
+  assert.equal(fake.submitted, false);
+});
+
+test('browser-backed validator reports missing and ambiguous timed autocomplete results', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { validateLiveLocationCatalog } = require('../src/qeeq/validateLocations');
+  for (const [mode, expectedCode] of [['missing', 'location_match_missing'], ['ambiguous', 'location_match_ambiguous']]) {
+    const fake = createFakeQeeqBrowser({ autocompleteOverrides: { KTW: mode } });
+    const result = await validateLiveLocationCatalog(task5Config({ resultsTimeoutMs: 200 }), { launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep });
+    assert.equal(result.validation_status, 'fail');
+    assert.equal(result.airports.find(item => item.iata === 'KTW').error_code, expectedCode);
+    assert.equal(fake.submitted, false);
+  }
+});
+
+test('group expansion waits for scoped anchors and skips an already-open group', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const delayed = createFakeQeeqBrowser({ expansionDelayPolls: 2 });
+  const delayedOutcome = await new QeeqScraper(task5Config(), { launchBrowser: delayed.launchBrowser, now: delayed.now, sleep: delayed.sleep }).runScenario(task5Scenario());
+  assert.equal(delayedOutcome.offers[0].provider_name, 'CARWIZ');
+  assert.equal(delayed.supplierButtonClicks, 1);
+  assert.equal(delayed.clockMs >= 200, true);
+
+  const alreadyOpen = createFakeQeeqBrowser({ initiallyOpen: true });
+  const openOutcome = await new QeeqScraper(task5Config(), { launchBrowser: alreadyOpen.launchBrowser, now: alreadyOpen.now, sleep: alreadyOpen.sleep }).runScenario(task5Scenario());
+  assert.equal(openOutcome.offers[0].provider_name, 'CARWIZ');
+  assert.equal(alreadyOpen.supplierButtonClicks, 0);
+});
+
+test('group expansion timeout remains diagnostic and does not read hidden anchors', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({ expansionDelayPolls: 99 });
+  const outcome = await new QeeqScraper(task5Config({ resultsTimeoutMs: 200 }), { launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep }).runScenario(task5Scenario());
+  assert.equal(outcome.offers.length, 0);
+  assert.equal(outcome.quality_errors.includes('group_expansion_timeout'), true);
+});
+
+test('load-more polls delayed growth and treats button disappearance as completion', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const delayed = createFakeQeeqBrowser({ loadMoreCounts: [25, 50], loadMoreDelayPolls: [2] });
+  const delayedOutcome = await new QeeqScraper(task5Config(), { launchBrowser: delayed.launchBrowser, now: delayed.now, sleep: delayed.sleep }).runScenario(task5Scenario());
+  assert.equal(delayedOutcome.quality_errors.includes('load_more_stalled'), false);
+  assert.equal(delayed.currentGroupCount, 50);
+
+  const disappeared = createFakeQeeqBrowser({ loadMoreCounts: [25, 25], loadMoreDisappearsAfterClick: 1 });
+  const disappearedOutcome = await new QeeqScraper(task5Config(), { launchBrowser: disappeared.launchBrowser, now: disappeared.now, sleep: disappeared.sleep }).runScenario(task5Scenario());
+  assert.equal(disappearedOutcome.quality_errors.includes('load_more_stalled'), false);
+});
+
+test('load-more respects the vehicle group cap before clicking', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser();
+  const outcome = await new QeeqScraper(task5Config({ maxVehicleGroupsPerScenario: 25 }), { launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep }).runScenario(task5Scenario());
+  assert.equal(fake.loadMoreClicks, 0);
+  assert.equal(outcome.quality_errors.includes('vehicle_group_limit_reached'), true);
+});
+
+test('API observation continues from an early unknown response to a later supported response', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({ responseSequence: [
+    { url: 'https://www.qeeq.pl/car-api/search/list?page=stale', payload: { changed: true } },
+    { url: 'https://www.qeeq.pl/car-api/search/list?page=current', payload: apiFixture, emitDelayMs: 5 }
+  ] });
+  const outcome = await new QeeqScraper(task5Config({ apiObservationTimeoutMs: 100 }), { launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep }).runScenario(task5Scenario());
+  assert.equal(outcome.offers[0].provider_name, 'CARWIZ');
+  assert.equal(outcome.quality_errors.includes('network_schema_unrecognized'), true);
+  assert.equal(fake.responseListeners, 0);
+});
+
+test('API observation uses one absolute budget across all JSON responses', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({ responseSequence: [
+    { url: 'https://www.qeeq.pl/car-api/search/list?page=first', payload: { changed: true }, jsonCostMs: 30 },
+    { url: 'https://www.qeeq.pl/car-api/search/list?page=second', payload: apiFixture, jsonCostMs: 30 }
+  ] });
+  const outcome = await new QeeqScraper(task5Config({ apiObservationTimeoutMs: 50 }), { launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep }).runScenario(task5Scenario());
+  assert.equal(outcome.offers.length, 0);
+  assert.equal(outcome.quality_errors.includes('network_schema_unrecognized'), true);
+  assert.equal(fake.responseListeners, 0);
+});
+
+test('visible popup and profile controls are used when hidden matches come first', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({ hiddenFirstControls: true });
+  const outcome = await new QeeqScraper(task5Config(), { launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep }).runScenario(task5Scenario());
+  assert.equal(outcome.status, 'success');
+  assert.deepEqual(fake.popupClicks, { optionalCookies: 1, lowerBanner: 1 });
+  assert.equal(fake.driverAge, '30-60');
+  assert.equal(fake.residenceCountryCode, 'PL');
+});
+
+test('atomic validator output overwrites and removes a unique temp after rename failure', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { writeAtomicJson } = require('../src/qeeq/validateLocations');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-atomic-'));
+  const output = path.join(directory, 'locations.json');
+  const originalRename = fs.renameSync;
+  const tempPaths = [];
+  try {
+    fs.renameSync = (source, destination) => {
+      tempPaths.push(source);
+      return originalRename(source, destination);
+    };
+    writeAtomicJson(output, { version: 1 });
+    writeAtomicJson(output, { version: 2 });
+    assert.deepEqual(JSON.parse(fs.readFileSync(output, 'utf8')), { version: 2 });
+    assert.notEqual(tempPaths[0], tempPaths[1]);
+
+    fs.renameSync = () => { throw new Error('simulated rename failure'); };
+    assert.throws(() => writeAtomicJson(output, { version: 3 }), /simulated rename failure/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(output, 'utf8')), { version: 2 });
+    assert.deepEqual(fs.readdirSync(directory).filter(name => name !== 'locations.json'), []);
+  } finally {
+    fs.renameSync = originalRename;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('scraper cleanup closes both resources and preserves the primary operation error', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({ failSessions: [1, 2], contextCloseError: 'context_close_failed', browserCloseError: 'browser_close_failed' });
+  const outcome = await new QeeqScraper(task5Config(), { launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep }).runScenario(task5Scenario());
+  assert.equal(outcome.error_code, 'session_expired');
+  assert.equal(fake.contextCloseAttempts, 2);
+  assert.equal(fake.browserCloseAttempts, 2);
+});
+
+test('scraper surfaces cleanup failure after success but still closes the browser', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({ contextCloseError: 'context_close_failed' });
+  const outcome = await new QeeqScraper(task5Config(), { launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep }).runScenario(task5Scenario());
+  assert.equal(outcome.error_code, 'context_close_failed');
+  assert.equal(fake.contextCloseAttempts, 1);
+  assert.equal(fake.browserCloseAttempts, 1);
+});
+
+test('browser-backed validator closes both resources with correct error precedence', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { validateLiveLocationCatalog } = require('../src/qeeq/validateLocations');
+  const operationFailure = createFakeQeeqBrowser({ failSessions: [1], contextCloseError: 'context_close_failed', browserCloseError: 'browser_close_failed' });
+  await assert.rejects(
+    validateLiveLocationCatalog(task5Config(), { launchBrowser: operationFailure.launchBrowser, now: operationFailure.now, sleep: operationFailure.sleep }),
+    error => error.code === 'session_expired'
+  );
+  assert.equal(operationFailure.contextCloseAttempts, 1);
+  assert.equal(operationFailure.browserCloseAttempts, 1);
+
+  const cleanupFailure = createFakeQeeqBrowser({ contextCloseError: 'context_close_failed', browserCloseError: 'browser_close_failed' });
+  await assert.rejects(
+    validateLiveLocationCatalog(task5Config(), { launchBrowser: cleanupFailure.launchBrowser, now: cleanupFailure.now, sleep: cleanupFailure.sleep }),
+    error => error.code === 'context_close_failed'
+  );
+  assert.equal(cleanupFailure.contextCloseAttempts, 1);
+  assert.equal(cleanupFailure.browserCloseAttempts, 1);
 });
