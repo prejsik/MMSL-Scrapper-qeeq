@@ -206,3 +206,39 @@ test('diagnostics redact QEEQ session values', () => {
   const clean = sanitizeDiagnosticText('id=secret-session clid=session-2 _vv_=view-secret fpt=abc ticket=def ts=123 qeeq_fpt=cookie');
   assert.doesNotMatch(clean, /secret-session|session-2|view-secret|abc|def|123|cookie/);
 });
+
+test('money parsing selects the amount associated with a currency marker', () => {
+  const { parseMoney } = require('../src/qeeq/utils');
+  assert.equal(parseMoney('2 dni, Cena 119 zł', 'PLN'), 119);
+  assert.equal(parseMoney('PLN 3 399,99', null), 3399.99);
+});
+
+test('text-only login and Diamond conditions cannot become public prices', () => {
+  const { normalizePriceCandidate } = require('../src/qeeq/utils');
+  const base = { displayedText: 'Cena 119 zł', rentalPeriodText: 'łącznie za 2 dni', rentalDays: 2 };
+  assert.equal(normalizePriceCandidate({ ...base, memberText: 'Zaloguj się, aby otrzymać ofertę' }).total_price, null);
+  assert.equal(normalizePriceCandidate({ ...base, memberText: 'Oferta Diamond dostępna dla członków' }).price_tier, 'conditional');
+});
+
+test('malformed source URLs are sanitized without recursive diagnostics', () => {
+  const { sanitizeSourceUrl } = require('../src/qeeq/utils');
+  assert.equal(sanitizeSourceUrl('http://[bad?ticket=secret-ticket'), 'http://[bad');
+});
+
+test('diagnostics redact quoted session values and credential headers', () => {
+  const { sanitizeDiagnosticText } = require('../src/qeeq/utils');
+  const clean = sanitizeDiagnosticText('ticket = "quoted-secret" clid = spaced-secret\nCookie: sid=cookie-secret; qeeq_fpt=other-cookie\nAuthorization: Bearer bearer-secret');
+  assert.doesNotMatch(clean, /quoted-secret|spaced-secret|cookie-secret|other-cookie|bearer-secret/);
+});
+
+test('CSV excludes forbidden identifiers and their values', () => {
+  const { toCsv } = require('../src/qeeq/utils');
+  const csv = toCsv([{ ID: 'secret-id', clid: 'secret-clid', safe: 'visible' }]);
+  assert.doesNotMatch(csv, /ID|clid|secret-id|secret-clid/i);
+  assert.match(csv, /safe|visible/);
+});
+
+test('CSV neutralizes string formulas but preserves numeric negatives', () => {
+  const { toCsv } = require('../src/qeeq/utils');
+  assert.equal(toCsv([{ formula: '=SUM(1,1)', negative: -2 }]), '"formula","negative"\n"\'=SUM(1,1)","-2"');
+});

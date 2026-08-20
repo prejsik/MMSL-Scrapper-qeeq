@@ -2,9 +2,20 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const MONEY_MARKER = /(?:\b(?:PLN|EUR|USD|GBP)\b|zł|€|\$|£)/i;
+const MONEY_AMOUNT = '(?:\\d{1,3}(?:[ .\\u00a0]\\d{3})+|\\d+)(?:[,.]\\d+)?';
+const MONEY_CURRENCY = '(?:\\b(?:PLN|EUR|USD|GBP)\\b|zł|€|\\$|£)';
 const INVALID_MONEY_LABELS = ['ocena', 'rating', 'depozyt', 'deposit'];
 const CONDITIONAL_LABEL = /diament|diamond|member|członk|login|zaloguj/i;
-const REDACTED_FIELD = /\b(id|clid|_vv_|fpt|ticket|ts|qeeq_fpt)\b\s*=\s*([^\s&#,;"']+)/gi;
+const REDACTED_FIELD = /\b(id|clid|_vv_|fpt|ticket|ts|qeeq_fpt)\b\s*=\s*(?:"[^"]*"|'[^']*'|[^\s&#,;"']+)/gi;
+const REDACTED_HEADER = /\b(cookie|authorization)\s*:\s*[^\r\n]*/gi;
+const REDACTED_BEARER = /\bbearer\s+[^\s,;"']+/gi;
+const FORBIDDEN_CSV_KEYS = new Set(['id', 'clid', '_vv_', 'fpt', 'ticket', 'ts', 'qeeq_fpt']);
+
+function parseAmount(value) {
+  const normalized = value.replace(/[ .\u00a0]/g, '').replace(',', '.');
+  const amount = Number(normalized);
+  return Number.isFinite(amount) && amount > 0 ? amount : null;
+}
 
 function parseMoney(raw, fallbackCurrency, options = {}) {
   if (typeof raw !== 'string' || !raw.trim() || /\d\s*%/.test(raw)) return null;
@@ -13,14 +24,15 @@ function parseMoney(raw, fallbackCurrency, options = {}) {
   if (rejectLabels.some(label => raw.toLocaleLowerCase('pl-PL').includes(String(label).toLocaleLowerCase('pl-PL')))) {
     return null;
   }
-  if (!MONEY_MARKER.test(raw) && !fallbackCurrency) return null;
+  const amountBeforeCurrency = new RegExp(`(${MONEY_AMOUNT})\\s*${MONEY_CURRENCY}`, 'i').exec(raw);
+  const currencyBeforeAmount = new RegExp(`${MONEY_CURRENCY}\\s*(${MONEY_AMOUNT})`, 'i').exec(raw);
+  const currencyMatch = amountBeforeCurrency || currencyBeforeAmount;
+  if (currencyMatch) return parseAmount(currencyMatch[1]);
+  if (!fallbackCurrency || MONEY_MARKER.test(raw)) return null;
 
-  const match = raw.match(/(?:\d{1,3}(?:[ .\u00a0]\d{3})+|\d+)(?:[,.]\d+)?/);
-  if (!match) return null;
-
-  const normalized = match[0].replace(/[ .\u00a0]/g, '').replace(',', '.');
-  const amount = Number(normalized);
-  return Number.isFinite(amount) && amount > 0 ? amount : null;
+  const candidates = [...raw.matchAll(new RegExp(MONEY_AMOUNT, 'g'))];
+  const amountCandidate = candidates.find(candidate => !/^\s*(?:dni|dzień|dnia)\b/i.test(raw.slice(candidate.index + candidate[0].length)));
+  return amountCandidate ? parseAmount(amountCandidate[0]) : null;
 }
 
 function hasVerifiedTotalPeriod(rentalPeriodText, rentalDays) {
@@ -36,7 +48,7 @@ function normalizePriceCandidate(input) {
   const displayedAmount = parseMoney(input?.displayedText, input?.fallbackCurrency);
   const memberAmount = parseMoney(input?.memberText, input?.fallbackCurrency);
   const isConditional = Boolean(input?.discountType)
-    || CONDITIONAL_LABEL.test(input?.displayedText || '')
+    || Object.values(input || {}).some(value => typeof value === 'string' && CONDITIONAL_LABEL.test(value))
     || memberAmount !== null;
   const conditionalOffer = isConditional ? displayedAmount : null;
   const conditionalMember = memberAmount;
@@ -71,7 +83,7 @@ function sanitizeSourceUrl(rawUrl) {
     const url = new URL(rawUrl);
     return `${url.origin}${url.pathname}`;
   } catch {
-    return sanitizeDiagnosticText(rawUrl).replace(/[?#].*$/, '');
+    return rawUrl.replace(/[?#].*$/, '');
   }
 }
 
@@ -79,13 +91,18 @@ function sanitizeDiagnosticText(text) {
   if (typeof text !== 'string') return '';
   return text
     .replace(/https?:\/\/[^\s"']+/gi, match => sanitizeSourceUrl(match))
+    .replace(REDACTED_HEADER, (_, field) => `${field}=[redacted]`)
+    .replace(REDACTED_BEARER, 'Bearer [redacted]')
     .replace(REDACTED_FIELD, (_, field) => `${field}=[redacted]`);
 }
 
 function toCsv(rows) {
   if (!Array.isArray(rows) || rows.length === 0) return '';
-  const headers = [...new Set(rows.flatMap(row => Object.keys(row || {})))];
-  const escape = value => `"${String(value ?? '').replace(/"/g, '""')}"`;
+  const headers = [...new Set(rows.flatMap(row => Object.keys(row || {}).filter(key => !FORBIDDEN_CSV_KEYS.has(key.toLowerCase()))))];
+  const escape = value => {
+    const safeValue = typeof value === 'string' && /^\s*[=+\-@]/.test(value) ? `'${value}` : value;
+    return `"${String(safeValue ?? '').replace(/"/g, '""')}"`;
+  };
   return [headers, ...rows.map(row => headers.map(header => row?.[header]))]
     .map(values => values.map(escape).join(','))
     .join('\n');
