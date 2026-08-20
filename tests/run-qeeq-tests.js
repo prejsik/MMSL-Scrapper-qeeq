@@ -990,3 +990,56 @@ test('clear-only autocomplete change cannot establish post-query freshness', asy
   assert.equal(validatorFake.selectedSuggestionIata, null);
   assert.equal(validatorFake.submitted, false);
 });
+
+test('run and quality statuses are independent', () => {
+  const { deriveStatuses, exitCodeForPayload } = require('../src/qeeq/run');
+  const status = deriveStatuses({ expected_checks: 2, completed_checks: 2, failed_checks: 0, verified_public_offer_count: 1, quality_errors: [] });
+  assert.deepEqual(status, { run_status: 'success', quality_status: 'pass' });
+  assert.equal(exitCodeForPayload(status), 0);
+  const warning = deriveStatuses({ expected_checks: 2, completed_checks: 1, failed_checks: 1, verified_public_offer_count: 1, quality_errors: ['location_id_drift'] });
+  assert.deepEqual(warning, { run_status: 'partial', quality_status: 'warning' });
+  assert.equal(exitCodeForPayload(warning), 2);
+  const failed = deriveStatuses({ expected_checks: 1, completed_checks: 1, failed_checks: 0, verified_public_offer_count: 0, quality_errors: ['price_unverified'] });
+  assert.equal(failed.quality_status, 'fail');
+  assert.equal(exitCodeForPayload(failed), 1);
+});
+
+test('CSV exports the full provider-offer contract and excludes groups', () => {
+  const { buildCsv } = require('../src/qeeq/report');
+  const csv = buildCsv({ scenarios: [{ groups: [{ record_type: 'group', vehicle_name: 'Skoda Fabia' }], offers: [{ record_type: 'offer', provider_name: 'PUBLIC PROVIDER', provider_rating_count: 120, seats: 5, doors: 5, luggage: 1, total_price: 119, daily_price: 59.5, reference_price: 140, price_label: 'Cena', currency: 'PLN', price_verified: true }] }] });
+  assert.match(csv, /seats,doors,luggage,provider_name,provider_rating,provider_rating_count/);
+  assert.match(csv, /total_price,daily_price,conditional_offer_total,conditional_offer_daily,conditional_offer_type,conditional_member_total,conditional_member_daily,reference_price/);
+  assert.match(csv, /5,5,1,PUBLIC PROVIDER,.*120/);
+  assert.doesNotMatch(csv, /record_type,group/);
+});
+
+test('quality summary and run manifest have concrete secret-free producers', () => {
+  const { buildQualitySummary, buildRunManifest } = require('../src/qeeq/report');
+  const payload = { schema_version: 1, run_status: 'partial', quality_status: 'warning', expected_checks: 2, completed_checks: 1, failed_checks: 1, quality: { verified_public_offer_count: 1, unverified_offer_count: 1 }, errors: [{ code: 'location_id_drift', scenario_key: 'x' }] };
+  const quality = buildQualitySummary(payload);
+  assert.equal(quality.quality_status, 'warning');
+  assert.equal(quality.error_codes.location_id_drift, 1);
+  const manifest = buildRunManifest(payload, [{ path: 'qeeq-results.csv', bytes: 123, sha256: 'abc' }]);
+  assert.equal(manifest.files[0].path, 'qeeq-results.csv');
+  assert.doesNotMatch(JSON.stringify(manifest), /ticket|qeeq_fpt|result_session_id/);
+});
+
+test('executeRun writes an atomic snapshot after each scenario', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { executeRun } = require('../src/qeeq/run');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-run-'));
+  const savePath = path.join(tempDir, 'result.json');
+  let snapshotsSeen = 0;
+  await executeRun({ savePath }, {
+    scenarioPlanner: () => [{ key: 'a' }, { key: 'b' }],
+    runScenario: async scenario => {
+      if (fs.existsSync(savePath)) snapshotsSeen += 1;
+      return { key: scenario.key, groups: [], offers: [{ record_type: 'offer', provider_name: 'PUBLIC PROVIDER', price_tier: 'public', price_verified: true, total_price: 119, currency: 'PLN' }], errors: [], quality_errors: [] };
+    }
+  });
+  assert.equal(snapshotsSeen, 1);
+  assert.equal(fs.existsSync(`${savePath}.tmp`), false);
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});

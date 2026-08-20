@@ -1,4 +1,201 @@
+const fs = require('node:fs');
+const path = require('node:path');
 const { catalogEntryForLocation } = require('./locations');
+const { loadConfig, parseCliArgs, printHelp } = require('./config');
+
+const OFFER_FIELDS = [
+  'vehicle_name', 'vehicle_category', 'transmission', 'seats', 'doors', 'luggage',
+  'provider_name', 'provider_rating', 'provider_rating_count', 'deposit_amount', 'deposit_currency',
+  'public_discounted_total', 'total_price', 'daily_price', 'conditional_offer_total',
+  'conditional_offer_daily', 'conditional_offer_type', 'conditional_member_total',
+  'conditional_member_daily', 'reference_price', 'currency', 'price_label', 'price_tier',
+  'price_scope', 'price_verified', 'conditional_price_verified', 'parsing_source',
+  'source_search_url', 'captured_at'
+];
+
+function cleanCode(value) {
+  return typeof value === 'string' && /^[a-z0-9_:-]+$/i.test(value) ? value : 'execution_failed';
+}
+
+function dateTime(date, time) {
+  return typeof date === 'string' && typeof time === 'string' ? `${date}T${time}:00` : null;
+}
+
+function buildScenarioPayload(input = {}) {
+  const scenario = input.scenario || {};
+  const outcome = input.outcome || {};
+  const airport = scenario.airport || {};
+  const offers = (Array.isArray(outcome.offers) ? outcome.offers : [])
+    .filter(offer => offer?.record_type === 'offer')
+    .map(offer => Object.fromEntries(OFFER_FIELDS.map(field => [field, offer[field] ?? null])));
+  const qualityErrors = [...new Set((outcome.quality_errors || []).map(cleanCode))];
+  const errors = (outcome.errors || []).map(error => ({ code: cleanCode(error?.code || outcome.error_code) }));
+  const failed = outcome.status === 'failure' || Boolean(outcome.error_code) || errors.length > 0;
+  if (failed && errors.length === 0) errors.push({ code: cleanCode(outcome.error_code) });
+  return {
+    key: scenario.key || outcome.key || null,
+    status: failed ? 'failure' : 'success',
+    requested_city: airport.city ?? null,
+    airport_key: airport.key ?? null,
+    iata: airport.iata ?? null,
+    qeeq_city_id: airport.cityId ?? null,
+    qeeq_landmark_id: airport.landmarkId ?? null,
+    pickup_at: dateTime(scenario.pickupDate, scenario.pickupTime),
+    dropoff_at: dateTime(scenario.dropoffDate, scenario.dropoffTime),
+    rental_days: scenario.rentalDays ?? null,
+    driver_age: input.config?.driverAge ?? null,
+    residence: input.config?.residenceCountryCode ?? null,
+    duration_ms: Number.isFinite(outcome.duration_ms) ? outcome.duration_ms : null,
+    groups: (Array.isArray(outcome.groups) ? outcome.groups : []).map(group => ({
+      record_type: 'group', vehicle_name: group?.vehicle_name ?? null,
+      price_verified: false, rental_days: group?.rental_days ?? scenario.rentalDays ?? null,
+      parsing_source: group?.parsing_source ?? null
+    })),
+    offers,
+    errors,
+    quality_errors: qualityErrors
+  };
+}
+
+function runOptions(config, scenarios) {
+  return {
+    start_dates: [...new Set(scenarios.map(scenario => scenario.pickupDate).filter(Boolean))],
+    durations_days: [...new Set(scenarios.map(scenario => scenario.rentalDays).filter(Number.isInteger))],
+    airport_keys: [...new Set(scenarios.map(scenario => scenario.airport?.key).filter(Boolean))],
+    limits: {
+      max_scenarios: config.maxScenarios ?? null,
+      max_vehicle_groups_per_scenario: config.maxVehicleGroupsPerScenario ?? null,
+      max_offers_per_scenario: config.maxOffersPerScenario ?? null
+    },
+    concurrency: config.locationConcurrency ?? null
+  };
+}
+
+function deriveStatuses(payload = {}) {
+  const expected = Number(payload.expected_checks) || 0;
+  const completed = Number(payload.completed_checks) || 0;
+  const failed = Number(payload.failed_checks) || 0;
+  const verified = Number(payload.verified_public_offer_count ?? payload.quality?.verified_public_offer_count) || 0;
+  const qualityErrors = payload.quality_errors || payload.quality?.quality_errors || [];
+  const run_status = expected === 0 || completed === 0
+    ? 'failure'
+    : completed === expected && failed === 0 ? 'success' : 'partial';
+  const quality_status = verified === 0
+    ? 'fail'
+    : qualityErrors.length > 0 ? 'warning' : 'pass';
+  return { run_status, quality_status };
+}
+
+function exitCodeForPayload(payload = {}) {
+  if (payload.run_status === 'failure' || payload.quality_status === 'fail') return 1;
+  if (payload.run_status === 'partial' || payload.quality_status === 'warning') return 2;
+  return 0;
+}
+
+function buildRootPayload(input = {}) {
+  const scenarios = input.scenarios || [];
+  const completedChecks = scenarios.filter(scenario => scenario.status === 'success').length;
+  const failedChecks = scenarios.filter(scenario => scenario.status !== 'success').length;
+  const verified = scenarios.flatMap(scenario => scenario.offers || [])
+    .filter(offer => offer.price_tier === 'public' && offer.price_verified === true && Number.isFinite(offer.total_price)).length;
+  const unverified = scenarios.flatMap(scenario => scenario.offers || []).length - verified;
+  const qualityErrors = [...new Set([
+    ...scenarios.flatMap(scenario => scenario.quality_errors || []),
+    ...scenarios.flatMap(scenario => (scenario.offers || []).flatMap(offer => {
+      if (offer.currency && offer.currency !== 'PLN') return ['unexpected_currency'];
+      return offer.price_verified === true ? [] : ['price_unverified'];
+    })),
+    ...scenarios.filter(scenario => scenario.status === 'success' && (scenario.offers || []).length === 0).map(() => 'empty_result')
+  ])];
+  const errors = scenarios.flatMap(scenario => (scenario.errors || []).map(error => ({
+    code: cleanCode(error.code), scenario_key: scenario.key
+  })));
+  const counts = {
+    expected_checks: input.expected_checks ?? input.expected_scenarios ?? scenarios.length,
+    completed_checks: completedChecks,
+    failed_checks: failedChecks,
+    verified_public_offer_count: verified,
+    quality_errors: qualityErrors
+  };
+  return {
+    schema_version: 1,
+    provider: 'qeeq.pl',
+    started_at: input.started_at || new Date().toISOString(),
+    completed_at: input.completed_at || null,
+    expected_scenarios: input.expected_scenarios ?? scenarios.length,
+    completed_scenarios: scenarios.length,
+    expected_checks: counts.expected_checks,
+    completed_checks: counts.completed_checks,
+    failed_checks: counts.failed_checks,
+    ...deriveStatuses(counts),
+    scenarios,
+    errors,
+    quality: {
+      verified_public_offer_count: verified,
+      unverified_offer_count: unverified,
+      quality_errors: qualityErrors
+    },
+    options: input.options || { start_dates: [], durations_days: [], airport_keys: [], limits: {}, concurrency: null }
+  };
+}
+
+function writeAtomicJson(target, value) {
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const temp = `${target}.tmp`;
+  try {
+    fs.writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    fs.renameSync(temp, target);
+  } catch (error) {
+    fs.rmSync(temp, { force: true });
+    throw error;
+  }
+}
+
+function progressLine(completed, total, elapsedMs) {
+  return `${completed}/${total} scenarios completed in ${(Math.max(0, elapsedMs) / 1000).toFixed(1)}s`;
+}
+
+async function executeRun(config = {}, deps = {}) {
+  const unknown = Object.keys(deps).filter(key => !['scenarioPlanner', 'runScenario'].includes(key));
+  if (unknown.length) throw new Error(`Unsupported executeRun dependency override: ${unknown[0]}`);
+  const scenarioPlanner = deps.scenarioPlanner || expandScenarios;
+  const scenarios = scenarioPlanner(config, new Date());
+  let runScenario = deps.runScenario;
+  if (!runScenario) {
+    const { QeeqScraper } = require('./scraper');
+    const scraper = new QeeqScraper(config);
+    runScenario = scenario => scraper.runScenario(scenario);
+  }
+  const startedAt = new Date().toISOString();
+  const results = [];
+  for (const scenario of scenarios) {
+    let outcome;
+    try {
+      outcome = await runScenario(scenario);
+    } catch {
+      outcome = { key: scenario.key, status: 'failure', errors: [{ code: 'execution_failed' }], groups: [], offers: [], quality_errors: [] };
+    }
+    results.push(buildScenarioPayload({ scenario, outcome, config }));
+    const snapshot = buildRootPayload({
+      started_at: startedAt,
+      expected_scenarios: scenarios.length,
+      expected_checks: scenarios.length,
+      scenarios: results,
+      options: runOptions(config, scenarios)
+    });
+    if (config.savePath) writeAtomicJson(config.savePath, snapshot);
+  }
+  const payload = buildRootPayload({
+    started_at: startedAt,
+    completed_at: new Date().toISOString(),
+    expected_scenarios: scenarios.length,
+    expected_checks: scenarios.length,
+    scenarios: results,
+    options: runOptions(config, scenarios)
+  });
+  if (config.savePath) writeAtomicJson(config.savePath, payload);
+  return payload;
+}
 
 function dateInTimeZone(date, timeZone) {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -54,4 +251,35 @@ function expandScenarios(config, now = new Date()) {
   })));
 }
 
-module.exports = { assertScenarioLimit, expandScenarios, scenarioKey };
+async function main(argv = process.argv.slice(2)) {
+  if (argv.includes('--help')) {
+    printHelp();
+    return 0;
+  }
+  const config = loadConfig(argv);
+  const args = parseCliArgs(argv);
+  const payload = await executeRun({ ...config, savePath: args.save });
+  process.exitCode = exitCodeForPayload(payload);
+  return process.exitCode;
+}
+
+if (require.main === module) {
+  main().catch(() => {
+    console.error('QEEQ run failed.');
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  assertScenarioLimit,
+  buildRootPayload,
+  buildScenarioPayload,
+  deriveStatuses,
+  executeRun,
+  exitCodeForPayload,
+  expandScenarios,
+  main,
+  progressLine,
+  scenarioKey,
+  writeAtomicJson
+};
