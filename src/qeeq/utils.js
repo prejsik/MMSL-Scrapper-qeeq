@@ -47,13 +47,14 @@ function normalizePriceCandidate(input) {
   const verifiedTotal = hasVerifiedTotalPeriod(input?.rentalPeriodText, rentalDays);
   const displayedAmount = parseMoney(input?.displayedText, input?.fallbackCurrency);
   const memberAmount = parseMoney(input?.memberText, input?.fallbackCurrency);
-  const isConditional = Boolean(input?.discountType)
-    || Object.values(input || {}).some(value => typeof value === 'string' && CONDITIONAL_LABEL.test(value))
-    || memberAmount !== null;
-  const conditionalOffer = isConditional ? displayedAmount : null;
+  const displayedIsConditional = Boolean(input?.discountType)
+    || (typeof input?.displayedText === 'string' && CONDITIONAL_LABEL.test(input.displayedText))
+    || (memberAmount === null && typeof input?.memberText === 'string' && CONDITIONAL_LABEL.test(input.memberText));
+  const hasConditionalPrice = displayedIsConditional || memberAmount !== null;
+  const conditionalOffer = displayedIsConditional ? displayedAmount : null;
   const conditionalMember = memberAmount;
   const conditionalVerified = verifiedTotal && (conditionalOffer !== null || conditionalMember !== null);
-  const publicVerified = verifiedTotal && !isConditional && displayedAmount !== null;
+  const publicVerified = verifiedTotal && !displayedIsConditional && displayedAmount !== null;
 
   return {
     total_price: publicVerified ? displayedAmount : null,
@@ -63,7 +64,7 @@ function normalizePriceCandidate(input) {
     conditional_offer_type: input?.discountType || null,
     conditional_member_total: conditionalVerified ? conditionalMember : null,
     conditional_member_daily: conditionalVerified && conditionalMember !== null ? conditionalMember / rentalDays : null,
-    price_tier: publicVerified ? 'public' : (isConditional ? 'conditional' : 'unknown'),
+    price_tier: publicVerified ? 'public' : (hasConditionalPrice ? 'conditional' : 'unknown'),
     price_scope: verifiedTotal ? 'total' : 'unknown',
     price_verified: publicVerified,
     conditional_price_verified: conditionalVerified

@@ -2894,3 +2894,21 @@ test('current QEEQ reserve href yields only the exact fabricated id bid pair', (
     href: '/car/booking?bid=SAFE_BID&clid=SAFE_CLIENT&id=SAFE_ID'
   })), /clid|SAFE_CLIENT|href/);
 });
+
+test('separate numeric Diamond row does not taint a verified public displayed total', () => {
+  const { normalizePriceCandidate } = require('../src/qeeq/utils');
+  const result = normalizePriceCandidate({
+    displayedText: 'Cena 119 zł', discountType: null,
+    memberText: 'Cena Diamentowa 98 zł',
+    rentalPeriodText: 'łącznie za 2 dni', rentalDays: 2
+  });
+  assert.equal(result.total_price, 119);
+  assert.equal(result.daily_price, 59.5);
+  assert.equal(result.conditional_offer_total, null);
+  assert.equal(result.conditional_offer_type, null);
+  assert.equal(result.conditional_member_total, 98);
+  assert.equal(result.conditional_member_daily, 49);
+  assert.equal(result.price_tier, 'public');
+  assert.equal(result.price_verified, true);
+  assert.equal(result.conditional_price_verified, true);
+});
