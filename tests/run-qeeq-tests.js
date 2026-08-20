@@ -1576,3 +1576,64 @@ test('merge validates recomputed root counts and required offer primitives', () 
   missingVerification.scenarios[0].offers = [{ record_type: 'offer', provider_name: 'PUBLIC', price_tier: 'public', total_price: 100, currency: 'PLN' }];
   assert.throws(() => mergePayloads([{ file: 'bad.json', payload: missingVerification }]), /offer.price_verified must be boolean/);
 });
+
+test('authoritative expected keys may expand but cannot shrink declared chunk workload', () => {
+  const { mergePayloads } = require('../src/qeeq/mergeResults');
+  const publicOffer = { record_type: 'offer', provider_name: 'PUBLIC', price_tier: 'public', price_verified: true, total_price: 100, currency: 'PLN' };
+  const entry = { file: 'part.json', payload: { schema_version: 1, provider: 'qeeq.pl', expected_scenarios: 1, scenarios: [{ key: 'a', status: 'success', offers: [publicOffer], errors: [], quality_errors: [] }], errors: [] } };
+  const expanded = mergePayloads([entry], { expectedScenarioKeys: ['a', 'b'] });
+  assert.equal(expanded.expected_scenarios, 2);
+  assert.equal(expanded.run_status, 'partial');
+
+  const overstated = structuredClone(entry);
+  overstated.payload.expected_scenarios = 3;
+  assert.throws(() => mergePayloads([overstated], { expectedScenarioKeys: ['a', 'b'] }), /declared workload exceeds authoritative expected keys/);
+});
+
+test('merge accepts null price tier emitted by the canonical Task6 builder as unrankable', () => {
+  const { buildRootPayload, buildScenarioPayload } = require('../src/qeeq/run');
+  const { mergePayloads } = require('../src/qeeq/mergeResults');
+  const scenario = { key: 'katowice-pyrzowice:2026-09-19:2', airport: { city: 'Katowice', key: 'katowice-pyrzowice', iata: 'KTW', cityId: '2477', landmarkId: '404260' }, pickupDate: '2026-09-19', pickupTime: '10:00', dropoffDate: '2026-09-21', dropoffTime: '10:00', rentalDays: 2 };
+  const canonicalScenario = buildScenarioPayload({ scenario, outcome: { status: 'success', offers: [{ record_type: 'offer', provider_name: 'PUBLIC', price_verified: false, total_price: null, currency: null }], errors: [], quality_errors: [] } });
+  assert.equal(canonicalScenario.offers[0].price_tier, null);
+  const chunk = buildRootPayload({ expected_scenarios: 1, expected_checks: 1, scenarios: [canonicalScenario], options: { start_dates: ['2026-09-19'], durations_days: [2], airport_keys: ['katowice-pyrzowice'], limits: { max_scenarios: 7020, max_vehicle_groups_per_scenario: 300, max_offers_per_scenario: 1500 }, concurrency: 1 } });
+  const merged = mergePayloads([{ file: 'part.json', payload: chunk }]);
+  assert.equal(merged.scenarios[0].offers[0].price_tier, null);
+  assert.equal(merged.quality.verified_public_offer_count, 0);
+  assert.equal(merged.quality_status, 'fail');
+});
+
+test('expected-keys containment uses root-safe relative paths and permits prefix siblings', () => {
+  const { spawnSync } = require('node:child_process');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-relative-'));
+  const inputDir = path.join(directory, 'parts');
+  const siblingDir = path.join(directory, 'parts-sibling');
+  const mergeScript = path.resolve(__dirname, '../src/qeeq/mergeResults.js');
+  const outputJson = path.join(directory, 'merged.json');
+  const outputCsv = path.join(directory, 'merged.csv');
+  try {
+    fs.mkdirSync(inputDir);
+    fs.mkdirSync(siblingDir);
+    const chunk = { schema_version: 1, provider: 'qeeq.pl', expected_scenarios: 1, scenarios: [{ key: 'a', status: 'success', offers: [{ record_type: 'offer', provider_name: 'PUBLIC', price_tier: 'public', price_verified: true, total_price: 100, currency: 'PLN' }], errors: [], quality_errors: [] }], errors: [] };
+    fs.writeFileSync(path.join(inputDir, 'part.json'), JSON.stringify(chunk));
+    const siblingExpected = path.join(siblingDir, 'expected.json');
+    fs.writeFileSync(siblingExpected, JSON.stringify(['a']));
+    const sibling = spawnSync(process.execPath, [mergeScript, '--input-dir=' + inputDir, '--expected-keys-file=' + siblingExpected, '--output-json=' + outputJson, '--output-csv=' + outputCsv], { encoding: 'utf8' });
+    assert.equal(sibling.status, 0);
+
+    const nestedExpected = path.join(inputDir, 'expected.txt');
+    fs.writeFileSync(nestedExpected, JSON.stringify(['a']));
+    const nested = spawnSync(process.execPath, [mergeScript, '--input-dir=' + inputDir, '--expected-keys-file=' + nestedExpected, '--output-json=' + outputJson, '--output-csv=' + outputCsv], { encoding: 'utf8' });
+    assert.equal(nested.status, 1);
+
+    const source = fs.readFileSync(mergeScript, 'utf8');
+    const helper = /function isWithin[\s\S]*?\n}/.exec(source)?.[0] || '';
+    assert.match(helper, /path\.relative/);
+    assert.doesNotMatch(helper, /startsWith/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

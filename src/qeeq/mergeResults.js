@@ -47,7 +47,10 @@ function pathIdentity(filePath) {
 }
 
 function isWithin(parentIdentity, childIdentity) {
-  return childIdentity === parentIdentity || childIdentity.startsWith(`${parentIdentity}${path.sep}`);
+  const relative = path.relative(parentIdentity, childIdentity);
+  if (relative === '') return true;
+  if (path.isAbsolute(relative)) return false;
+  return relative.split(path.sep)[0] !== '..';
 }
 
 function assertRegularFile(filePath, label) {
@@ -174,7 +177,7 @@ function normalizeOffer(offer) {
   }
   if (typeof normalized.provider_name !== 'string' || normalized.provider_name.trim() === '') throw new Error('offer.provider_name must be a nonblank string');
   if (typeof normalized.price_verified !== 'boolean') throw new Error('offer.price_verified must be boolean');
-  if (!['public', 'diamond', 'member', 'conditional', 'unknown'].includes(normalized.price_tier)) throw new Error('offer.price_tier is invalid');
+  if (normalized.price_tier != null && !['public', 'diamond', 'member', 'conditional', 'unknown'].includes(normalized.price_tier)) throw new Error('offer.price_tier is invalid');
   return normalized;
 }
 
@@ -348,6 +351,7 @@ function mergePayloads(entries, options = {}) {
   const expectedSet = expectedKeys ? new Set(expectedKeys) : null;
   if (expectedSet) for (const key of scenarioKeys) if (!expectedSet.has(key)) throw new Error(`Unexpected scenario key: ${key}`);
   const chunkExpected = chunks.reduce((total, chunk) => total + chunk.expected, 0);
+  if (expectedSet && chunkExpected > expectedSet.size) throw new Error('Chunk declared workload exceeds authoritative expected keys');
   const expectedCount = expectedSet ? expectedSet.size : chunkExpected;
   if (expectedCount < scenarios.length) throw new Error('Chunk scenarios exceed the requested workload');
 
