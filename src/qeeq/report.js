@@ -85,7 +85,6 @@ function buildRunManifest(payload = {}, generatedFiles = []) {
 }
 
 function descriptor(filePath, outputDir) {
-  if (!fs.existsSync(filePath)) throw new Error(`Missing manifest input: ${filePath}`);
   const bytes = fs.statSync(filePath).size;
   return {
     path: path.relative(outputDir, filePath).replace(/\\/g, '/'),
@@ -94,16 +93,24 @@ function descriptor(filePath, outputDir) {
   };
 }
 
-function writeJson(outputPath, value) {
-  ensureDir(path.dirname(outputPath));
-  fs.writeFileSync(outputPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+function writeAtomicJson(outputPath, value) {
+  const directory = path.dirname(outputPath);
+  ensureDir(directory);
+  const tempPath = path.join(directory, `.${path.basename(outputPath)}.${crypto.randomUUID()}.tmp`);
+  try {
+    fs.writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    fs.renameSync(tempPath, outputPath);
+  } catch (error) {
+    fs.rmSync(tempPath, { force: true });
+    throw error;
+  }
 }
 
 function writeAuxiliaryReports(outputDir, payload, generatedFiles) {
   const qualityPath = path.join(outputDir, 'quality-summary.json');
   const manifestPath = path.join(outputDir, 'run-manifest.json');
-  writeJson(qualityPath, buildQualitySummary(payload));
-  writeJson(manifestPath, buildRunManifest(payload, generatedFiles));
+  writeAtomicJson(qualityPath, buildQualitySummary(payload));
+  writeAtomicJson(manifestPath, buildRunManifest(payload, generatedFiles));
   return { qualityPath, manifestPath };
 }
 
@@ -125,6 +132,10 @@ function printSummary(payload) {
 function parseAuxArgs(argv) {
   const args = {};
   for (const argument of argv) {
+    if (argument === '--help') {
+      args.help = true;
+      continue;
+    }
     const match = /^--([^=]+)=(.*)$/.exec(argument);
     if (!match) throw new Error(`Unknown option: ${argument}`);
     args[match[1]] = match[2];
@@ -149,17 +160,30 @@ function main(argv = process.argv.slice(2)) {
     if (!args[key]) throw new Error(`Missing required option: --${key}`);
   }
   const inputPath = path.resolve(args.input);
-  if (!fs.existsSync(inputPath)) throw new Error(`Missing manifest input: ${args.input}`);
-  const outputDir = path.dirname(path.resolve(args['output-manifest']));
+  const qualityPath = path.resolve(args['output-quality']);
+  const manifestPath = path.resolve(args['output-manifest']);
+  const outputDir = path.dirname(manifestPath);
   const files = args['manifest-files'].split(',').map(item => path.resolve(item));
   const fileNames = files.map(file => path.basename(file));
   if (files.length !== AUX_MANIFEST_FILES.length || new Set(fileNames).size !== files.length
     || fileNames.some(name => !AUX_MANIFEST_FILES.includes(name))) {
     throw new Error('manifest-files must contain the exact QEEQ JSON, CSV, HTML, and XLSX files');
   }
+  if (path.dirname(qualityPath) !== outputDir || files.some(file => path.dirname(file) !== outputDir)) {
+    throw new Error('All manifest inputs and outputs must use the common output directory');
+  }
+  const jsonMember = files.find(file => path.basename(file) === 'qeeq-results-latest.json');
+  if (inputPath !== jsonMember) throw new Error('input must exactly match the JSON manifest member');
+  if (qualityPath === manifestPath || files.includes(qualityPath) || files.includes(manifestPath)) {
+    throw new Error('Auxiliary report outputs cannot collide with manifest inputs or each other');
+  }
+  for (const file of files) {
+    if (!fs.existsSync(file)) throw new Error(`Missing manifest input: ${file}`);
+  }
   const payload = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
-  writeJson(path.resolve(args['output-quality']), buildQualitySummary(payload));
-  writeJson(path.resolve(args['output-manifest']), buildRunManifest(payload, files.map(file => descriptor(file, outputDir))));
+  const descriptors = files.map(file => descriptor(file, outputDir));
+  writeAtomicJson(qualityPath, buildQualitySummary(payload));
+  writeAtomicJson(manifestPath, buildRunManifest(payload, descriptors));
   return 0;
 }
 
@@ -181,6 +205,7 @@ module.exports = {
   main,
   printResultsTable,
   printSummary,
+  writeAtomicJson,
   writeAuxiliaryReports,
   writeCsvReport
 };

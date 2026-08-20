@@ -17,6 +17,21 @@ function cleanCode(value) {
   return typeof value === 'string' && /^[a-z0-9_:-]+$/i.test(value) ? value : 'execution_failed';
 }
 
+function arrayOf(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function canonicalSourceSearchUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && url.hostname === 'www.qeeq.pl' && url.pathname === '/car/search'
+      ? 'https://www.qeeq.pl/car/search'
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 function dateTime(date, time) {
   return typeof date === 'string' && typeof time === 'string' ? `${date}T${time}:00` : null;
 }
@@ -25,11 +40,15 @@ function buildScenarioPayload(input = {}) {
   const scenario = input.scenario || {};
   const outcome = input.outcome || {};
   const airport = scenario.airport || {};
-  const offers = (Array.isArray(outcome.offers) ? outcome.offers : [])
+  const offers = arrayOf(outcome.offers)
     .filter(offer => offer?.record_type === 'offer')
-    .map(offer => Object.fromEntries(OFFER_FIELDS.map(field => [field, offer[field] ?? null])));
-  const qualityErrors = [...new Set((outcome.quality_errors || []).map(cleanCode))];
-  const errors = (outcome.errors || []).map(error => ({ code: cleanCode(error?.code || outcome.error_code) }));
+    .map(offer => ({
+      ...Object.fromEntries(OFFER_FIELDS.map(field => [field, offer[field] ?? null])),
+      source_search_url: canonicalSourceSearchUrl(offer.source_search_url)
+    }));
+  const offerQualityErrors = arrayOf(outcome.offers).flatMap(offer => arrayOf(offer?.quality_errors));
+  const qualityErrors = [...new Set([...arrayOf(outcome.quality_errors), ...offerQualityErrors].map(cleanCode))];
+  const errors = arrayOf(outcome.errors).map(error => ({ code: cleanCode(error?.code || outcome.error_code) }));
   const failed = outcome.status === 'failure' || Boolean(outcome.error_code) || errors.length > 0;
   if (failed && errors.length === 0) errors.push({ code: cleanCode(outcome.error_code) });
   return {
@@ -46,7 +65,7 @@ function buildScenarioPayload(input = {}) {
     driver_age: input.config?.driverAge ?? null,
     residence: input.config?.residenceCountryCode ?? null,
     duration_ms: Number.isFinite(outcome.duration_ms) ? outcome.duration_ms : null,
-    groups: (Array.isArray(outcome.groups) ? outcome.groups : []).map(group => ({
+    groups: arrayOf(outcome.groups).map(group => ({
       record_type: 'group', vehicle_name: group?.vehicle_name ?? null,
       price_verified: false, rental_days: group?.rental_days ?? scenario.rentalDays ?? null,
       parsing_source: group?.parsing_source ?? null
@@ -87,27 +106,27 @@ function deriveStatuses(payload = {}) {
 }
 
 function exitCodeForPayload(payload = {}) {
-  if (payload.run_status === 'failure' || payload.quality_status === 'fail') return 1;
-  if (payload.run_status === 'partial' || payload.quality_status === 'warning') return 2;
-  return 0;
+  if (payload.run_status === 'success' && payload.quality_status === 'pass') return 0;
+  if (['success', 'partial'].includes(payload.run_status) && ['pass', 'warning'].includes(payload.quality_status)) return 2;
+  return 1;
 }
 
 function buildRootPayload(input = {}) {
-  const scenarios = input.scenarios || [];
+  const scenarios = arrayOf(input.scenarios);
   const completedChecks = scenarios.filter(scenario => scenario.status === 'success').length;
   const failedChecks = scenarios.filter(scenario => scenario.status !== 'success').length;
-  const verified = scenarios.flatMap(scenario => scenario.offers || [])
+  const verified = scenarios.flatMap(scenario => arrayOf(scenario.offers))
     .filter(offer => offer.price_tier === 'public' && offer.price_verified === true && Number.isFinite(offer.total_price)).length;
-  const unverified = scenarios.flatMap(scenario => scenario.offers || []).length - verified;
+  const unverified = scenarios.flatMap(scenario => arrayOf(scenario.offers)).length - verified;
   const qualityErrors = [...new Set([
-    ...scenarios.flatMap(scenario => scenario.quality_errors || []),
-    ...scenarios.flatMap(scenario => (scenario.offers || []).flatMap(offer => {
+    ...scenarios.flatMap(scenario => arrayOf(scenario.quality_errors)),
+    ...scenarios.flatMap(scenario => arrayOf(scenario.offers).flatMap(offer => {
       if (offer.currency && offer.currency !== 'PLN') return ['unexpected_currency'];
-      return offer.price_verified === true ? [] : ['price_unverified'];
+      return offer.price_verified === true || offer.conditional_price_verified === true ? [] : ['price_unverified'];
     })),
-    ...scenarios.filter(scenario => scenario.status === 'success' && (scenario.offers || []).length === 0).map(() => 'empty_result')
+    ...scenarios.filter(scenario => scenario.status === 'success' && arrayOf(scenario.offers).length === 0).map(() => 'empty_result')
   ])];
-  const errors = scenarios.flatMap(scenario => (scenario.errors || []).map(error => ({
+  const errors = scenarios.flatMap(scenario => arrayOf(scenario.errors).map(error => ({
     code: cleanCode(error.code), scenario_key: scenario.key
   })));
   const counts = {
@@ -167,24 +186,37 @@ async function executeRun(config = {}, deps = {}) {
     runScenario = scenario => scraper.runScenario(scenario);
   }
   const startedAt = new Date().toISOString();
-  const results = [];
-  for (const scenario of scenarios) {
-    let outcome;
-    try {
-      outcome = await runScenario(scenario);
-    } catch {
-      outcome = { key: scenario.key, status: 'failure', errors: [{ code: 'execution_failed' }], groups: [], offers: [], quality_errors: [] };
-    }
-    results.push(buildScenarioPayload({ scenario, outcome, config }));
+  const results = new Array(scenarios.length);
+  const writeSnapshot = () => {
     const snapshot = buildRootPayload({
       started_at: startedAt,
       expected_scenarios: scenarios.length,
       expected_checks: scenarios.length,
-      scenarios: results,
+      scenarios: results.filter(Boolean),
       options: runOptions(config, scenarios)
     });
     if (config.savePath) writeAtomicJson(config.savePath, snapshot);
-  }
+  };
+  let nextIndex = 0;
+  const concurrency = Number.isInteger(config.locationConcurrency) && config.locationConcurrency > 0
+    ? Math.min(config.locationConcurrency, Math.max(scenarios.length, 1))
+    : 1;
+  const worker = async () => {
+    while (nextIndex < scenarios.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const scenario = scenarios[index];
+      let outcome;
+      try {
+        outcome = await runScenario(scenario);
+      } catch {
+        outcome = { key: scenario.key, status: 'failure', errors: [{ code: 'execution_failed' }], groups: [], offers: [], quality_errors: [] };
+      }
+      results[index] = buildScenarioPayload({ scenario, outcome, config });
+      writeSnapshot();
+    }
+  };
+  await Promise.all(Array.from({ length: concurrency }, worker));
   const payload = buildRootPayload({
     started_at: startedAt,
     completed_at: new Date().toISOString(),

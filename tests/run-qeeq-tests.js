@@ -1043,3 +1043,131 @@ test('executeRun writes an atomic snapshot after each scenario', async () => {
   assert.equal(fs.existsSync(`${savePath}.tmp`), false);
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
+
+test('canonical envelopes keep only the stable QEEQ search URL', () => {
+  const { buildRootPayload, buildScenarioPayload } = require('../src/qeeq/run');
+  const scenario = { key: 'a', airport: { key: 'ktw', iata: 'KTW' }, pickupDate: '2026-09-01', pickupTime: '10:00', dropoffDate: '2026-09-03', dropoffTime: '10:00', rentalDays: 2 };
+  const stable = buildScenarioPayload({ scenario, outcome: { offers: [{ record_type: 'offer', provider_name: 'PUBLIC', source_search_url: 'https://www.qeeq.pl/car/search?id=secret&ticket=secret', price_verified: true }], errors: [], quality_errors: [] } });
+  assert.equal(stable.offers[0].source_search_url, 'https://www.qeeq.pl/car/search');
+  assert.doesNotMatch(JSON.stringify(stable), /secret|ticket/);
+  assert.doesNotMatch(JSON.stringify(buildRootPayload({ expected_checks: 1, scenarios: [stable] })), /secret|ticket/);
+  const foreign = buildScenarioPayload({ scenario, outcome: { offers: [{ record_type: 'offer', provider_name: 'PUBLIC', source_search_url: 'https://example.test/car/search?id=secret' }], errors: [], quality_errors: [] } });
+  assert.equal(foreign.offers[0].source_search_url, null);
+});
+
+test('exit code accepts only exact known successful and warning states', () => {
+  const { exitCodeForPayload } = require('../src/qeeq/run');
+  assert.equal(exitCodeForPayload({ run_status: 'success', quality_status: 'pass' }), 0);
+  assert.equal(exitCodeForPayload({ run_status: 'partial', quality_status: 'pass' }), 2);
+  assert.equal(exitCodeForPayload({ run_status: 'success', quality_status: 'warning' }), 2);
+  assert.equal(exitCodeForPayload({ run_status: 'partial', quality_status: 'warning' }), 2);
+  for (const payload of [{}, { run_status: 'success', quality_status: 'unknown' }, { run_status: 'unknown', quality_status: 'pass' }, { run_status: 'failure', quality_status: 'warning' }, { run_status: 'partial', quality_status: 'fail' }]) {
+    assert.equal(exitCodeForPayload(payload), 1);
+  }
+});
+
+test('verified conditional price does not downgrade otherwise valid public quality', () => {
+  const { buildRootPayload } = require('../src/qeeq/run');
+  const payload = buildRootPayload({ expected_checks: 1, scenarios: [{ key: 'a', status: 'success', errors: [], quality_errors: [], offers: [{ record_type: 'offer', price_tier: 'public', price_verified: true, conditional_price_verified: true, total_price: 100, currency: 'PLN' }] }] });
+  assert.equal(payload.quality_status, 'pass');
+  assert.equal(payload.quality.quality_errors.length, 0);
+});
+
+test('offer quality errors are sanitized and folded into root quality', () => {
+  const { buildScenarioPayload, buildRootPayload } = require('../src/qeeq/run');
+  const scenario = { key: 'a' };
+  const item = buildScenarioPayload({ scenario, outcome: { offers: [{ record_type: 'offer', provider_name: 'PUBLIC', price_tier: 'public', price_verified: true, total_price: 100, currency: 'PLN', quality_errors: ['discount_type_mismatch', 'ticket=secret'] }], errors: [], quality_errors: [] } });
+  const payload = buildRootPayload({ expected_checks: 1, scenarios: [item] });
+  assert.equal(payload.quality_status, 'warning');
+  assert.equal(payload.quality.quality_errors.includes('discount_type_mismatch'), true);
+  assert.doesNotMatch(JSON.stringify(payload), /ticket=secret/);
+});
+
+test('auxiliary reports preflight complete inputs and write actual descriptors atomically', () => {
+  const crypto = require('node:crypto');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { main } = require('../src/qeeq/report');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-aux-'));
+  const names = ['qeeq-results-latest.json', 'qeeq-results.csv', 'qeeq-report.html', 'qeeq-summary.xlsx'];
+  const files = names.map(name => path.join(directory, name));
+  const quality = path.join(directory, 'quality-summary.json');
+  const manifest = path.join(directory, 'run-manifest.json');
+  try {
+    fs.writeFileSync(files[0], JSON.stringify({ run_status: 'success', quality_status: 'pass', quality: {} }));
+    fs.writeFileSync(files[1], 'csv');
+    fs.writeFileSync(files[2], '<html>report</html>');
+    fs.writeFileSync(files[3], 'xlsx');
+    assert.equal(main(['--input=' + files[0], '--output-quality=' + quality, '--output-manifest=' + manifest, '--manifest-files=' + files.join(',')]), 0);
+    const built = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+    assert.deepEqual(built.files.map(item => item.bytes), files.map(file => fs.statSync(file).size));
+    assert.deepEqual(built.files.map(item => item.sha256), files.map(file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')));
+    fs.rmSync(quality);
+    fs.rmSync(manifest);
+    fs.rmSync(files[3]);
+    assert.throws(() => main(['--input=' + files[0], '--output-quality=' + quality, '--output-manifest=' + manifest, '--manifest-files=' + files.join(',')]), /Missing manifest input/);
+    assert.equal(fs.existsSync(quality), false);
+    assert.equal(fs.existsSync(manifest), false);
+    assert.throws(() => main(['--input=' + path.join(directory, 'other.json'), '--output-quality=' + quality, '--output-manifest=' + manifest, '--manifest-files=' + files.join(',')]), /exactly match/);
+    assert.throws(() => main(['--input=' + files[0], '--output-quality=' + files[1], '--output-manifest=' + manifest, '--manifest-files=' + files.join(',')]), /cannot collide/);
+    assert.throws(() => main(['--input=' + files[0], '--output-quality=' + quality, '--output-manifest=' + manifest, '--manifest-files=' + [files[0], files[1], files[2], path.join(os.tmpdir(), 'qeeq-summary.xlsx')].join(',')]), /common output directory/);
+    assert.equal(main(['--help']), 0);
+    assert.equal(fs.existsSync(quality), false);
+    assert.equal(fs.existsSync(manifest), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('executeRun honors bounded concurrency, deterministic result order, and serialized snapshots', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { executeRun } = require('../src/qeeq/run');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-concurrency-'));
+  const savePath = path.join(directory, 'result.json');
+  let active = 0;
+  let maxActive = 0;
+  let snapshots = 0;
+  const originalRename = fs.renameSync;
+  try {
+    fs.renameSync = (...args) => { snapshots += 1; return originalRename(...args); };
+    const payload = await executeRun({ savePath, locationConcurrency: 2 }, {
+      scenarioPlanner: () => [{ key: 'a' }, { key: 'b' }, { key: 'c' }],
+      runScenario: scenario => new Promise(resolve => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        setTimeout(() => {
+          active -= 1;
+          resolve({ key: scenario.key, status: 'success', groups: [], offers: [{ record_type: 'offer', provider_name: scenario.key, price_tier: 'public', price_verified: true, total_price: 1, currency: 'PLN' }], errors: [], quality_errors: [] });
+        }, scenario.key === 'a' ? 20 : 1);
+      })
+    });
+    assert.equal(maxActive, 2);
+    assert.deepEqual(payload.scenarios.map(item => item.key), ['a', 'b', 'c']);
+    assert.equal(snapshots, 4);
+    assert.equal(fs.existsSync(`${savePath}.tmp`), false);
+  } finally {
+    fs.renameSync = originalRename;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('CSV has the exact fixed header order and neutralizes formulas without forbidden fields', () => {
+  const { CSV_HEADERS, buildCsv } = require('../src/qeeq/report');
+  const csv = buildCsv({ scenarios: [{ key: 'a', offers: [{ record_type: 'offer', provider_name: '=PUBLIC', total_price: -2, ticket: 'secret', qeeq_fpt: 'secret' }] }] });
+  const [header, row] = csv.split('\n');
+  assert.equal(header, CSV_HEADERS.join(','));
+  assert.match(row, /'=PUBLIC/);
+  assert.doesNotMatch(csv, /ticket|qeeq_fpt|secret/);
+});
+
+test('canonical envelope tolerates malformed list fields', () => {
+  const { buildScenarioPayload } = require('../src/qeeq/run');
+  const payload = buildScenarioPayload({ outcome: { offers: {}, groups: {}, errors: {}, quality_errors: 'bad' } });
+  assert.deepEqual(payload.offers, []);
+  assert.deepEqual(payload.groups, []);
+  assert.deepEqual(payload.errors, []);
+  assert.deepEqual(payload.quality_errors, []);
+});
