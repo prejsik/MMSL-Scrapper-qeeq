@@ -4520,3 +4520,229 @@ test('pricing CLI validates inputs and writes recommendations atomically', t => 
   assert.deepEqual(JSON.parse(fs.readFileSync(output, 'utf8')),
     buildPricingRecommendations(pricingFixtureRankTwo(), { rules: {}, calibration: { approved: false } }));
 });
+
+async function createSyntheticQeeqTariffFixture() {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const ExcelJS = require('exceljs');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-excel-updater-'));
+  const baselinePath = path.join(directory, 'baseline.xlsx');
+  const recommendationsPath = path.join(directory, 'recommendations.json');
+  const configPath = path.join(directory, 'layout.json');
+  const outputPath = path.join(directory, 'import.xlsx');
+  const summaryPath = path.join(directory, 'summary.json');
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Sheet1');
+  workbook.addWorksheet('Notes').getCell('A1').value = 'Unrelated sheet';
+  sheet.mergeCells('A1:C1');
+  sheet.getCell('A1').value = 'Synthetic tariff';
+  sheet.getCell('I2').value = 2;
+  sheet.getCell('I3').value = 3;
+  sheet.getCell('J2').value = 4;
+  sheet.getCell('J3').value = 7;
+  ['Group', 'Name', 'Unused', 'Zone', 'Unused 2', 'Unused 3', 'Pickup start', 'Unused 4', '2-3 days', '4-7 days', 'Formula']
+    .forEach((value, index) => { sheet.getRow(4).getCell(index + 1).value = value; });
+  const rows = [
+    ['CDMR', 'Katowice', null, 'KALO', null, null, new Date(Date.UTC(2026, 8, 10)), null, 70, 80],
+    ['CDMR', 'Warsaw', null, 'WALO', null, null, '2026-09-10', null, 70, 80],
+    ['CGAV', 'Excluded', null, 'KALO', null, null, '2026-09-10', null, 60, 65],
+    ['EDMV', 'Adjusted', null, 'KALO', null, null, '2026-09-11', null, 75, 85],
+    ['CDMR', 'Other date', null, 'KALO', null, null, '2026-09-12', null, 77, 87]
+  ];
+  rows.forEach((values, index) => {
+    values.forEach((value, column) => { sheet.getRow(index + 5).getCell(column + 1).value = value; });
+  });
+  sheet.getCell('K5').value = { formula: 'I5+J5', result: 150 };
+  sheet.getCell('I5').style = {
+    font: { bold: true, color: { argb: 'FF123456' } },
+    fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFF00' } },
+    border: { bottom: { style: 'thin', color: { argb: 'FF000000' } } },
+    alignment: { horizontal: 'center' },
+    numFmt: '0.00'
+  };
+  sheet.getColumn(1).width = 14;
+  sheet.getColumn(9).width = 18;
+  sheet.getRow(5).height = 25;
+  await workbook.xlsx.writeFile(baselinePath);
+  const decisions = [
+    {
+      scenario_key: 'katowice-pyrzowice:2026-09-10:2', airport_key: 'katowice-pyrzowice',
+      tariff_zones: ['KALO'], pickup_date: '2026-09-10', rental_days: 2,
+      calibration_status: 'approved', import_action: 'increase', suggested_rate_pln_day: 90,
+      data_quality_status: 'complete'
+    },
+    {
+      scenario_key: 'warsaw-chopin:2026-09-10:2', airport_key: 'warsaw-chopin',
+      tariff_zones: ['WALO'], pickup_date: '2026-09-10', rental_days: 2,
+      calibration_status: 'unapproved', import_action: 'review', suggested_rate_pln_day: null,
+      data_quality_status: 'complete'
+    },
+    {
+      scenario_key: 'warsaw-modlin:2026-09-10:2', airport_key: 'warsaw-modlin',
+      tariff_zones: [], pickup_date: '2026-09-10', rental_days: 2,
+      calibration_status: 'approved', import_action: 'review', suggested_rate_pln_day: null,
+      data_quality_status: 'unmapped_tariff_zone'
+    }
+  ];
+  fs.writeFileSync(recommendationsPath, JSON.stringify({
+    schema_version: 1, provider: 'qeeq.pl', decisions, import_recommendations: [decisions[0]]
+  }));
+  fs.writeFileSync(configPath, JSON.stringify({
+    worksheet: 'Sheet1', headerRow: 4, dataStartRow: 5, durationMinRow: 2, durationMaxRow: 3,
+    columns: { group: 1, zone: 4, pickupStartDate: 7, rateStart: 9 },
+    excludedGroups: ['CGAV', 'FVMD', 'SWAV'], groupRateAdjustmentsPlnDay: { EDMV: 1 },
+    minExcelChangePlnDay: 0.01
+  }));
+  return { directory, baselinePath, recommendationsPath, configPath, outputPath, summaryPath };
+}
+
+test('Excel updater changes only authorized mapped cells and preserves the baseline', async t => {
+  const fs = require('node:fs');
+  const ExcelJS = require('exceljs');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const before = fs.readFileSync(fixture.baselinePath);
+  const summary = await generateImportWorkbook({
+    workbookPath: fixture.baselinePath,
+    recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath,
+    outputPath: fixture.outputPath,
+    summaryPath: fixture.summaryPath
+  });
+  assert.deepEqual(fs.readFileSync(fixture.baselinePath), before);
+  assert.equal(summary.applied_count, 1);
+  assert.equal(summary.review_count, 2);
+  assert.equal(summary.unmapped_count, 1);
+  assert.deepEqual(summary.changed_cells, [{ cell: 'I5', old_rate_pln_day: 70, new_rate_pln_day: 90 }]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(fixture.summaryPath, 'utf8')), summary);
+  const output = new ExcelJS.Workbook();
+  await output.xlsx.readFile(fixture.outputPath);
+  assert.deepEqual(output.worksheets.map(sheet => sheet.name), ['Sheet1']);
+  assert.equal(output.getWorksheet('Sheet1').getCell('I5').value, 90);
+  assert.equal(output.getWorksheet('Sheet1').getCell('I6').value, 70);
+  assert.equal(output.getWorksheet('Sheet1').getCell('I7').value, 60);
+  assert.equal(output.getWorksheet('Sheet1').getCell('K5').formula, 'I5+J5');
+});
+
+test('Excel updater selects duration bands, applies group adjustments, and counts excluded or unmatched items', async t => {
+  const fs = require('node:fs');
+  const ExcelJS = require('exceljs');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const payload = JSON.parse(fs.readFileSync(fixture.recommendationsPath, 'utf8'));
+  const additions = [
+    {
+      scenario_key: 'katowice-pyrzowice:2026-09-11:5', tariff_zones: ['KALO'], pickup_date: '2026-09-11', rental_days: 5,
+      calibration_status: 'approved', import_action: 'decrease', suggested_rate_pln_day: 50, data_quality_status: 'complete'
+    },
+    {
+      scenario_key: 'katowice-pyrzowice:2026-09-13:2', tariff_zones: ['KALO'], pickup_date: '2026-09-13', rental_days: 2,
+      calibration_status: 'approved', import_action: 'increase', suggested_rate_pln_day: 99, data_quality_status: 'complete'
+    }
+  ];
+  payload.decisions.push(...additions);
+  payload.import_recommendations.push(...additions);
+  fs.writeFileSync(fixture.recommendationsPath, JSON.stringify(payload));
+  const summary = await generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+  });
+  const output = new ExcelJS.Workbook();
+  await output.xlsx.readFile(fixture.outputPath);
+  const sheet = output.getWorksheet('Sheet1');
+  assert.equal(sheet.getCell('J8').value, 51);
+  assert.equal(sheet.getCell('I7').value, 60);
+  assert.equal(summary.applied_count, 2);
+  assert.equal(summary.skipped_count, 1);
+  assert.equal(summary.unmatched_count, 1);
+});
+
+test('Excel updater preserves formulas, styles, dimensions, and merged cells', async t => {
+  const fs = require('node:fs');
+  const ExcelJS = require('exceljs');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  await generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+  });
+  const output = new ExcelJS.Workbook();
+  await output.xlsx.readFile(fixture.outputPath);
+  const sheet = output.getWorksheet('Sheet1');
+  assert.equal(sheet.getCell('K5').formula, 'I5+J5');
+  assert.deepEqual(sheet.getCell('I5').font, { bold: true, color: { argb: 'FF123456' } });
+  assert.equal(sheet.getCell('I5').fill.fgColor.argb, 'FFFFFF00');
+  assert.equal(sheet.getCell('I5').border.bottom.style, 'thin');
+  assert.equal(sheet.getCell('I5').alignment.horizontal, 'center');
+  assert.equal(sheet.getCell('I5').numFmt, '0.00');
+  assert.equal(sheet.getColumn(1).width, 14);
+  assert.equal(sheet.getColumn(9).width, 18);
+  assert.equal(sheet.getRow(5).height, 25);
+  assert.equal(sheet.getCell('A1').isMerged, true);
+  assert.equal(sheet.getCell('C1').master.address, 'A1');
+});
+
+test('Excel updater rejects path collisions and invalid active recommendations before output', async t => {
+  const fs = require('node:fs');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  await assert.rejects(() => generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: fixture.baselinePath, summaryPath: fixture.summaryPath
+  }), /paths must be distinct/i);
+  assert.equal(fs.existsSync(fixture.summaryPath), false);
+  const payload = JSON.parse(fs.readFileSync(fixture.recommendationsPath, 'utf8'));
+  payload.import_recommendations[0].suggested_rate_pln_day = null;
+  fs.writeFileSync(fixture.recommendationsPath, JSON.stringify(payload));
+  await assert.rejects(() => generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+  }), /approved finite positive/i);
+  assert.equal(fs.existsSync(fixture.outputPath), false);
+  assert.equal(fs.existsSync(fixture.summaryPath), false);
+});
+
+test('Excel updater rejects duplicate recommendation keys and leaves review items untouched', async t => {
+  const fs = require('node:fs');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const payload = JSON.parse(fs.readFileSync(fixture.recommendationsPath, 'utf8'));
+  payload.import_recommendations.push({ ...payload.import_recommendations[0], scenario_key: 'duplicate' });
+  fs.writeFileSync(fixture.recommendationsPath, JSON.stringify(payload));
+  await assert.rejects(() => generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+  }), /duplicate recommendation key/i);
+  assert.equal(fs.existsSync(fixture.outputPath), false);
+});
+
+test('Excel updater atomic rename failure preserves an existing output and removes temporary files', async t => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  fs.writeFileSync(fixture.outputPath, 'existing valid output');
+  const originalRename = fs.renameSync;
+  fs.renameSync = (source, target) => {
+    if (path.resolve(target) === path.resolve(fixture.outputPath)) throw new Error('simulated output rename failure');
+    return originalRename(source, target);
+  };
+  try {
+    await assert.rejects(() => generateImportWorkbook({
+      workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+      configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+    }), /simulated output rename failure/);
+  } finally {
+    fs.renameSync = originalRename;
+  }
+  assert.equal(fs.readFileSync(fixture.outputPath, 'utf8'), 'existing valid output');
+  assert.equal(fs.existsSync(fixture.summaryPath), false);
+  assert.deepEqual(fs.readdirSync(fixture.directory).filter(name => name.includes('.tmp')), []);
+});
