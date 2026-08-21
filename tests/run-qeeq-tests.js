@@ -1176,6 +1176,70 @@ test('executeRun writes an atomic snapshot after each scenario', async () => {
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
+test('run JSON writer retries a transient rename lock and uses a unique temporary file per write', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { writeAtomicJson } = require('../src/qeeq/run');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-run-atomic-'));
+  const output = path.join(directory, 'result.json');
+  const originalRename = fs.renameSync;
+  const renameSources = [];
+  let renameAttempts = 0;
+  try {
+    fs.renameSync = (source, destination) => {
+      renameSources.push(source);
+      renameAttempts += 1;
+      if (renameAttempts === 1) {
+        const error = new Error('simulated OneDrive rename lock');
+        error.code = 'EPERM';
+        throw error;
+      }
+      return originalRename(source, destination);
+    };
+
+    writeAtomicJson(output, { completed_at: '2026-08-21T15:00:00.000Z' });
+    writeAtomicJson(output, { completed_at: '2026-08-21T15:01:00.000Z' });
+
+    assert.equal(renameAttempts, 3);
+    assert.equal(renameSources[0], renameSources[1]);
+    assert.notEqual(renameSources[0], renameSources[2]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(output, 'utf8')), { completed_at: '2026-08-21T15:01:00.000Z' });
+    assert.deepEqual(fs.readdirSync(directory), ['result.json']);
+  } finally {
+    fs.renameSync = originalRename;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('run JSON writer preserves the existing target and removes its temp file after retries are exhausted', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { writeAtomicJson } = require('../src/qeeq/run');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-run-atomic-failure-'));
+  const output = path.join(directory, 'result.json');
+  const originalRename = fs.renameSync;
+  let renameAttempts = 0;
+  fs.writeFileSync(output, 'OLD JSON');
+  try {
+    fs.renameSync = () => {
+      renameAttempts += 1;
+      const error = new Error('simulated permanent OneDrive rename lock');
+      error.code = 'EPERM';
+      throw error;
+    };
+
+    assert.throws(() => writeAtomicJson(output, { completed_at: '2026-08-21T15:00:00.000Z' }), error => error?.code === 'EPERM');
+    assert.equal(renameAttempts, 3);
+    assert.equal(fs.readFileSync(output, 'utf8'), 'OLD JSON');
+    assert.deepEqual(fs.readdirSync(directory), ['result.json']);
+  } finally {
+    fs.renameSync = originalRename;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('canonical envelopes keep only the stable QEEQ search URL', () => {
   const { buildRootPayload, buildScenarioPayload } = require('../src/qeeq/run');
   const scenario = { key: 'a', airport: { key: 'ktw', iata: 'KTW' }, pickupDate: '2026-09-01', pickupTime: '10:00', dropoffDate: '2026-09-03', dropoffTime: '10:00', rentalDays: 2 };
@@ -1797,8 +1861,8 @@ test('HTML ranks only finite verified public totals and separates conditional pr
   assert.match(html, /CARWIZ/);
   assert.match(html, /newcomer_coupon[\s\S]*106/);
   assert.match(html, /Cena Diamentowa[\s\S]*98/);
-  const top3 = html.match(/<section id="top3">([\s\S]*?)<\/section>/)[1];
-  assert.match(top3, /CHEAPEST[\s\S]*100[\s\S]*TIE FIRST[\s\S]*119[\s\S]*TIE SECOND[\s\S]*119/);
+  const top3 = html.match(/<section id="top3"[^>]*>([\s\S]*?)<\/section>/)[1];
+  assert.match(top3, /CHEAPEST[\s\S]*50 PLN[\s\S]*TIE FIRST[\s\S]*59\.5 PLN[\s\S]*TIE SECOND[\s\S]*59\.5 PLN/);
   assert.doesNotMatch(top3, /FOURTH|CARWIZ|MEMBER|INFINITE|NULL TIER/);
 });
 
@@ -1927,22 +1991,45 @@ test('HTML inline filters require one offer row to match provider and transmissi
     { dataset: { airport: 'KTW', pickupDate: '2026-09-19', duration: '2', transmission: 'Automatic', provider: 'A', status: 'success' }, hidden: false },
     { dataset: { airport: 'KTW', pickupDate: '2026-09-19', duration: '2', transmission: 'Manual', provider: 'B', status: 'success' }, hidden: false }
   ];
-  const article = { dataset: { airport: 'KTW', pickupDate: '2026-09-19', duration: '2', status: 'success' }, hidden: false, querySelectorAll() { return rows; } };
-  const emptyArticle = { dataset: { airport: 'KTW', pickupDate: '2026-09-19', duration: '2', status: 'failure' }, hidden: false, querySelectorAll() { return []; } };
+  const detailArticle = { dataset: { key: 'x', airport: 'KTW', pickupDate: '2026-09-19', duration: '2', status: 'success' }, hidden: false, querySelectorAll() { return rows; } };
+  const emptyDetailArticle = { dataset: { key: 'y', airport: 'KTW', pickupDate: '2026-09-19', duration: '2', status: 'failure' }, hidden: false, querySelectorAll() { return []; } };
+  const marketArticle = { dataset: { key: 'x', airport: 'KTW', pickupDate: '2026-09-19', duration: '2', status: 'success' }, hidden: false };
+  const emptyMarketArticle = { dataset: { key: 'y', airport: 'KTW', pickupDate: '2026-09-19', duration: '2', status: 'failure' }, hidden: false };
+  const resultsStatus = { textContent: '' };
+  const emptyState = { hidden: true };
   const document = {
-    getElementById(id) { return controls[id.replace('filter-', '')]; },
-    querySelectorAll(selector) { return selector === 'article.scenario' ? [article, emptyArticle] : rows; }
+    getElementById(id) {
+      if (id === 'results-status') return resultsStatus;
+      if (id === 'empty-state') return emptyState;
+      return controls[id.replace('filter-', '')];
+    },
+    querySelectorAll(selector) {
+      if (selector === 'article.scenario') return [detailArticle, emptyDetailArticle];
+      if (selector === 'article.market-scenario') return [marketArticle, emptyMarketArticle];
+      if (selector === 'tr.filterable-offer') return rows;
+      return [];
+    }
   };
   vm.runInNewContext(script, { document });
   controls.provider.value = 'A';
   controls.transmission.value = 'Manual';
   controls.provider.callback();
-  assert.equal(article.hidden, true);
-  assert.equal(emptyArticle.hidden, true);
+  assert.equal(marketArticle.hidden, true);
+  assert.equal(emptyMarketArticle.hidden, true);
+  assert.equal(detailArticle.hidden, true);
+  assert.equal(emptyDetailArticle.hidden, true);
+  assert.deepEqual(rows.map(row => row.hidden), [true, true]);
+  assert.equal(resultsStatus.textContent, 'Widoczne scenariusze: 0');
+  assert.equal(emptyState.hidden, false);
   controls.transmission.value = 'Automatic';
   controls.provider.callback();
-  assert.equal(article.hidden, false);
+  assert.equal(marketArticle.hidden, false);
+  assert.equal(emptyMarketArticle.hidden, true);
+  assert.equal(detailArticle.hidden, false);
+  assert.equal(emptyDetailArticle.hidden, true);
   assert.deepEqual(rows.map(row => row.hidden), [false, true]);
+  assert.equal(resultsStatus.textContent, 'Widoczne scenariusze: 1');
+  assert.equal(emptyState.hidden, true);
 });
 
 test('HTML ignores malformed ranked offers and non-string pickup timestamps', () => {
@@ -1969,6 +2056,52 @@ function marketReportFixture() {
     }]
   };
 }
+
+test('HTML uses the DiscoverCars visual hierarchy for a compact Top 3 and MM market view', () => {
+  const { buildHtmlReport } = require('../src/qeeq/reportHtml');
+  const html = buildHtmlReport(marketReportFixture());
+  const market = html.match(/<section id="top3"[^>]*>([\s\S]*?)<\/section>/)?.[1] || '';
+
+  assert.match(html, /color-scheme:dark/);
+  assert.match(html, /--bg:\s*#0c1015/);
+  assert.match(html, /id="toggle-filters"/);
+  assert.match(html, /class="toolbar"/);
+  assert.match(market, /2026-09-19[\s\S]*2 dni/);
+  for (const heading of ['Top 1 firma', 'Top 1 PLN/d', 'Top 2 firma', 'Top 2 PLN/d', 'Top 3 firma', 'Top 3 PLN/d', 'MM PLN/d', 'Pozycja MM', 'Status danych']) {
+    assert.match(market, new RegExp(heading.replace('/', '\\/')));
+  }
+  assert.equal((market.match(/data-top-provider="Ace"/g) || []).length, 1);
+  assert.match(market, /MM Cars Rental[\s\S]*65 PLN[\s\S]*4[\s\S]*3/);
+  assert.match(html, /<details id="details"(?![^>]*\sopen)[^>]*>/);
+});
+
+test('HTML gives present, confirmed-missing, and incomplete MM evidence distinct Polish statuses', () => {
+  const { buildHtmlReport } = require('../src/qeeq/reportHtml');
+  const payload = marketReportFixture();
+  payload.options.start_dates = ['2026-09-19', '2026-09-20', '2026-09-21'];
+  payload.scenarios.push(
+    {
+      key: 'ktw:2026-09-20:2', status: 'success', airport_key: 'katowice-pyrzowice', iata: 'KTW', pickup_at: '2026-09-20T10:00:00', rental_days: 2,
+      offers: [{ provider_name: 'Ace', vehicle_name: 'Fiesta', total_price: 100, daily_price: 50, currency: 'PLN', price_tier: 'public', price_verified: true }]
+    },
+    {
+      key: 'ktw:2026-09-21:2', status: 'failure', airport_key: 'katowice-pyrzowice', iata: 'KTW', pickup_at: '2026-09-21T10:00:00', rental_days: 2,
+      offers: []
+    }
+  );
+  const html = buildHtmlReport(payload);
+  const scenario = key => html.match(new RegExp(`<article class="market-scenario" data-key="${key}"[^>]*>[\\s\\S]*?<\\/article>`))?.[0] || '';
+
+  const present = scenario('ktw:2026-09-19:2');
+  assert.match(present, /data-mm-availability="present"/);
+  assert.match(present, /class="status-badge mm-present">MM dostępne/);
+  const missing = scenario('ktw:2026-09-20:2');
+  assert.match(missing, /data-mm-availability="confirmed_missing"/);
+  assert.match(missing, /class="status-badge mm-missing">Brak MM — pełne dane/);
+  const incomplete = scenario('ktw:2026-09-21:2');
+  assert.match(incomplete, /data-mm-availability="incomplete"/);
+  assert.match(incomplete, /class="status-badge mm-incomplete">Nie można potwierdzić — niepełne dane/);
+});
 
 test('HTML and XLSX use distinct-provider Top 3 and expose MM rank separately', async () => {
   const { buildHtmlReport } = require('../src/qeeq/reportHtml');
