@@ -12,7 +12,9 @@
     "qeeq:merge": "node src/qeeq/mergeResults.js --input-dir=downloaded-parts --output-json=output/qeeq-results-latest.json --output-csv=output/qeeq-results.csv",
     "qeeq:report": "node src/qeeq/reportHtml.js output/qeeq-results-latest.json output/qeeq-report.html",
     "qeeq:xlsx": "node src/qeeq/reportXlsx.js output/qeeq-results-latest.json output/qeeq-summary.xlsx",
-    "qeeq:aux": "node src/qeeq/report.js --input=output/qeeq-results-latest.json --output-quality=output/quality-summary.json --output-manifest=output/run-manifest.json --manifest-files=output/qeeq-results-latest.json,output/qeeq-results.csv,output/qeeq-report.html,output/qeeq-summary.xlsx",
+    "qeeq:recommend": "node src/qeeq/pricingRecommendations.js output/qeeq-results-latest.json output/qeeq-pricing-recommendations.json --config=qeeq-pricing-rules.config.example.json --calibration=qeeq-rate-calibration.config.example.json",
+    "qeeq:excel": "node src/qeeq/updateExcelRates.js",
+    "qeeq:aux": "node src/qeeq/report.js --input=output/qeeq-results-latest.json --output-quality=output/quality-summary.json --output-manifest=output/run-manifest.json --manifest-files=output/qeeq-results-latest.json,output/qeeq-results.csv,output/qeeq-report.html,output/qeeq-summary.xlsx,output/qeeq-pricing-recommendations.json",
     "qeeq:plan": "node src/qeeq/workflowPlan.js",
     "test": "node --test tests/run-qeeq-tests.js"
   },

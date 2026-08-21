@@ -1225,7 +1225,10 @@ test('auxiliary reports preflight complete inputs and write actual descriptors a
   const path = require('node:path');
   const { main } = require('../src/qeeq/report');
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-aux-'));
-  const names = ['qeeq-results-latest.json', 'qeeq-results.csv', 'qeeq-report.html', 'qeeq-summary.xlsx'];
+  const names = [
+    'qeeq-results-latest.json', 'qeeq-results.csv', 'qeeq-report.html', 'qeeq-summary.xlsx',
+    'qeeq-pricing-recommendations.json'
+  ];
   const files = names.map(name => path.join(directory, name));
   const quality = path.join(directory, 'quality-summary.json');
   const manifest = path.join(directory, 'run-manifest.json');
@@ -1234,19 +1237,20 @@ test('auxiliary reports preflight complete inputs and write actual descriptors a
     fs.writeFileSync(files[1], 'csv');
     fs.writeFileSync(files[2], '<html>report</html>');
     fs.writeFileSync(files[3], 'xlsx');
+    fs.writeFileSync(files[4], JSON.stringify({ schema_version: 1, provider: 'qeeq.pl', counts: {} }));
     assert.equal(main(['--input=' + files[0], '--output-quality=' + quality, '--output-manifest=' + manifest, '--manifest-files=' + files.join(',')]), 0);
     const built = JSON.parse(fs.readFileSync(manifest, 'utf8'));
     assert.deepEqual(built.files.map(item => item.bytes), files.map(file => fs.statSync(file).size));
     assert.deepEqual(built.files.map(item => item.sha256), files.map(file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')));
     fs.rmSync(quality);
     fs.rmSync(manifest);
-    fs.rmSync(files[3]);
+    fs.rmSync(files[4]);
     assert.throws(() => main(['--input=' + files[0], '--output-quality=' + quality, '--output-manifest=' + manifest, '--manifest-files=' + files.join(',')]), /Missing manifest input/);
     assert.equal(fs.existsSync(quality), false);
     assert.equal(fs.existsSync(manifest), false);
     assert.throws(() => main(['--input=' + path.join(directory, 'other.json'), '--output-quality=' + quality, '--output-manifest=' + manifest, '--manifest-files=' + files.join(',')]), /exactly match/);
     assert.throws(() => main(['--input=' + files[0], '--output-quality=' + files[1], '--output-manifest=' + manifest, '--manifest-files=' + files.join(',')]), /cannot collide/);
-    assert.throws(() => main(['--input=' + files[0], '--output-quality=' + quality, '--output-manifest=' + manifest, '--manifest-files=' + [files[0], files[1], files[2], path.join(os.tmpdir(), 'qeeq-summary.xlsx')].join(',')]), /common output directory/);
+    assert.throws(() => main(['--input=' + files[0], '--output-quality=' + quality, '--output-manifest=' + manifest, '--manifest-files=' + [files[0], files[1], files[2], files[3], path.join(os.tmpdir(), 'qeeq-pricing-recommendations.json')].join(',')]), /common output directory/);
     assert.equal(main(['--help']), 0);
     assert.equal(fs.existsSync(quality), false);
     assert.equal(fs.existsSync(manifest), false);
@@ -1314,7 +1318,10 @@ test('auxiliary reports reject a Windows case-variant output collision without o
   const path = require('node:path');
   const { main } = require('../src/qeeq/report');
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-aux-case-'));
-  const names = ['qeeq-results-latest.json', 'qeeq-results.csv', 'qeeq-report.html', 'qeeq-summary.xlsx'];
+  const names = [
+    'qeeq-results-latest.json', 'qeeq-results.csv', 'qeeq-report.html', 'qeeq-summary.xlsx',
+    'qeeq-pricing-recommendations.json'
+  ];
   const files = names.map(name => path.join(directory, name));
   const quality = path.join(directory, 'quality-summary.json');
   const manifest = path.join(directory, 'run-manifest.json');
@@ -1324,6 +1331,7 @@ test('auxiliary reports reject a Windows case-variant output collision without o
     fs.writeFileSync(files[1], originalCsv);
     fs.writeFileSync(files[2], '<html>report</html>');
     fs.writeFileSync(files[3], 'xlsx');
+    fs.writeFileSync(files[4], JSON.stringify({ schema_version: 1, provider: 'qeeq.pl', counts: {} }));
     assert.throws(() => main(['--input=' + files[0], '--output-quality=' + path.join(directory, 'QEEQ-RESULTS.CSV'), '--output-manifest=' + manifest, '--manifest-files=' + files.join(',')]), /cannot collide/);
     assert.equal(fs.readFileSync(files[1], 'utf8'), originalCsv);
     assert.equal(fs.existsSync(quality), false);
@@ -2296,6 +2304,56 @@ test('Telegram final summary does not emit hostile MM date values', () => {
   assert.doesNotMatch(message, /evil\.test|ticket=secret|\nhttps:/);
 });
 
+test('Telegram final summary adds bounded recommendation counts without leaking hostile values', () => {
+  const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
+  const text = buildFinalSummary({
+    run_status: 'success', quality_status: 'pass', quality: {}
+  }, {
+    recommendations: {
+      counts: {
+        decision_count: 12,
+        site_recommendation_count: 4,
+        import_recommendation_count: 0,
+        increase_count: 3,
+        decrease_count: 1,
+        hold_count: 6,
+        review_count: `2\nhttps://evil.test/?ticket=secret`
+      },
+      reason: 'https://evil.test/?ticket=secret'
+    },
+    reportUrl: 'https://example.test/report.html',
+    runUrl: 'https://github.com/example/actions/runs/1'
+  });
+  assert.match(text, /Rekomendacje — decyzje: 12, site: 4, import: 0/);
+  assert.match(text, /zwiększ: 3, zmniejsz: 1, hold: 6, review: 0/);
+  assert.match(text, /Raport: https:\/\/example\.test\/report\.html/);
+  assert.match(text, /Run GitHub Actions: https:\/\/github\.com\/example\/actions\/runs\/1/);
+  assert.doesNotMatch(text, /evil\.test|ticket=secret/);
+  assert.ok([...text].length <= 4096);
+
+  const countsOnly = buildFinalSummary({}, { recommendations: { decision_count: 2, site_recommendation_count: 1 } });
+  assert.match(countsOnly, /Rekomendacje — decyzje: 2, site: 1, import: 0/);
+});
+
+test('Telegram final summary stays within 4096 characters and preserves prioritized links', () => {
+  const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
+  const startDates = Array.from({ length: 500 }, (_, index) => {
+    const date = new Date(Date.UTC(2026, 0, 1 + index));
+    return date.toISOString().slice(0, 10);
+  });
+  const text = buildFinalSummary({
+    options: { start_dates: startDates, airport_keys: ['ktw'], durations_days: [2] },
+    scenarios: []
+  }, {
+    recommendations: { counts: { decision_count: 500, review_count: 500 } },
+    reportUrl: 'https://example.test/report.html',
+    runUrl: 'https://github.com/example/actions/runs/1'
+  });
+  assert.ok([...text].length <= 4096);
+  assert.match(text, /Raport: https:\/\/example\.test\/report\.html/);
+  assert.match(text, /Run GitHub Actions: https:\/\/github\.com\/example\/actions\/runs\/1/);
+});
+
 test('Telegram summaries reject unsafe links and sanitize hostile malformed inputs deterministically', () => {
   const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
   const hostile = { toString: null };
@@ -2395,6 +2453,9 @@ test('Telegram summary argument parser has exact modes and rejects ambiguous arg
   assert.deepEqual(summary.parseSummaryArgs(['--mode=final-summary', '--input=result.json', '--report-url=https://example.test/report']), {
     mode: 'final-summary', input: 'result.json', reportUrl: 'https://example.test/report'
   });
+  assert.deepEqual(summary.parseSummaryArgs(['--mode=final-summary', '--input=result.json', '--recommendations=recommendations.json']), {
+    mode: 'final-summary', input: 'result.json', recommendations: 'recommendations.json'
+  });
   assert.deepEqual(summary.parseSummaryArgs(['--mode=plan-failure', '--error=invalid matrix', '--run-url=https://example.test/run']), {
     mode: 'plan-failure', error: 'invalid matrix', runUrl: 'https://example.test/run'
   });
@@ -2402,6 +2463,7 @@ test('Telegram summary argument parser has exact modes and rejects ambiguous arg
     [], ['--help', '--mode=final-summary'], ['--wat=yes'], ['positional'], ['--mode'],
     ['--mode=other'], ['--mode=final-summary'], ['--mode=plan-failure'],
     ['--mode=final-summary', '--input=a', '--input=b'],
+    ['--mode=final-summary', '--input=a', '--recommendations=a', '--recommendations=b'],
     ['--mode=final-summary', '--input=a', '--error=bad'],
     ['--mode=plan-failure', '--error=bad', '--input=a'],
     ['--mode=plan-failure', '--error=bad', '--report-url=https://example.test/report'],
@@ -4165,6 +4227,23 @@ test('workflow actions are pinned to reviewed immutable commits', () => {
   for (const [, action, revision] of uses) {
     assert.equal(revision, expected.get(action), `${action} must use its reviewed commit`);
   }
+});
+
+test('daily merge publishes QEEQ recommendations but never runs the Excel updater', () => {
+  const packageJson = require('../package.json');
+  const fs = require('node:fs');
+  const workflow = fs.readFileSync('.github/workflows/qeeq-daily.yml', 'utf8');
+  const smoke = fs.readFileSync('.github/workflows/qeeq-smoke.yml', 'utf8');
+  assert.equal(packageJson.scripts['qeeq:recommend'],
+    'node src/qeeq/pricingRecommendations.js output/qeeq-results-latest.json output/qeeq-pricing-recommendations.json --config=qeeq-pricing-rules.config.example.json --calibration=qeeq-rate-calibration.config.example.json');
+  assert.equal(packageJson.scripts['qeeq:excel'], 'node src/qeeq/updateExcelRates.js');
+  assert.match(packageJson.scripts['qeeq:aux'], /output\/qeeq-pricing-recommendations\.json/);
+  assert.match(workflow, /npm run qeeq:recommend/);
+  assert.match(workflow, /output\/qeeq-pricing-recommendations\.json/);
+  assert.match(workflow, /merged\/qeeq-pricing-recommendations\.json/);
+  assert.match(workflow, /--recommendations=merged\/qeeq-pricing-recommendations\.json/);
+  assert.doesNotMatch(workflow, /qeeq:excel|updateExcelRates|qeeq-rates-import-ready\.xlsx/);
+  assert.doesNotMatch(smoke, /qeeq:recommend|qeeq:excel|pricingRecommendations|updateExcelRates|qeeq-pricing|deploy-pages|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID/);
 });
 
 test('market view ranks the cheapest verified offer from each distinct provider', () => {
