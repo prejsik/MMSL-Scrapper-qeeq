@@ -4442,6 +4442,29 @@ test('pricing CLI leaves no output for a malformed canonical matrix', t => {
   assert.equal(fs.existsSync(output), false);
 });
 
+test('pricing rejects a malformed canonical offer before decision or CLI output', t => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { buildPricingRecommendations, main } = require('../src/qeeq/pricingRecommendations');
+  const payload = pricingFixtureRankTwo();
+  payload.scenarios[0].offers.push(42);
+  const approved = { approved: true, minMultiplier: 1, maxMultiplier: 1.2, defaultMultiplier: 1.1 };
+  assert.throws(() => buildPricingRecommendations(payload, { calibration: approved }), /Malformed canonical QEEQ offer/);
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-pricing-offer-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const input = path.join(directory, 'input.json');
+  const config = path.join(directory, 'rules.json');
+  const calibration = path.join(directory, 'calibration.json');
+  const output = path.join(directory, 'output.json');
+  fs.writeFileSync(input, JSON.stringify(payload));
+  fs.writeFileSync(config, JSON.stringify({ pricing: {} }));
+  fs.writeFileSync(calibration, JSON.stringify(approved));
+  assert.throws(() => main([input, output, `--config=${config}`, `--calibration=${calibration}`]), /Malformed canonical QEEQ offer/);
+  assert.equal(fs.existsSync(output), false);
+});
+
 test('pricing recommendation order and counts are deterministic', () => {
   const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
   const payload = pricingFixtureRankTwo();

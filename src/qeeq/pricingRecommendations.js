@@ -4,6 +4,7 @@ const path = require('node:path');
 const { locationCatalog } = require('./locations');
 const { buildScenarioMarketView } = require('./marketView');
 const { classifyMmAvailability } = require('./mmAvailability');
+const { isVerifiedPublicOffer } = require('./utils');
 
 const DEFAULT_PRICING_RULES = Object.freeze({
   top1GapThresholdPlnDay: 10,
@@ -95,6 +96,22 @@ function canonicalList(value, label, validate) {
   return new Set(value);
 }
 
+function validateCanonicalOffer(offer) {
+  if (!offer || typeof offer !== 'object' || Array.isArray(offer)
+      || (offer.record_type != null && offer.record_type !== 'offer')
+      || typeof offer.provider_name !== 'string' || !offer.provider_name.trim()
+      || typeof offer.price_verified !== 'boolean'
+      || (offer.vehicle_name != null && typeof offer.vehicle_name !== 'string')
+      || (offer.currency != null && typeof offer.currency !== 'string')
+      || (offer.price_tier != null && !['public', 'diamond', 'member', 'conditional', 'unknown'].includes(offer.price_tier))
+      || (offer.total_price != null && !Number.isFinite(offer.total_price))
+      || (offer.daily_price != null && !Number.isFinite(offer.daily_price))
+      || (offer.conditional_price_verified != null && typeof offer.conditional_price_verified !== 'boolean')
+      || (offer.price_verified === true && !isVerifiedPublicOffer(offer))) {
+    throw new Error('Malformed canonical QEEQ offer');
+  }
+}
+
 function validateCanonicalPayload(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)
       || payload.schema_version !== 1 || payload.provider !== 'qeeq.pl'
@@ -141,6 +158,7 @@ function validateCanonicalPayload(payload) {
       throw new Error(`Malformed canonical QEEQ scenario key: ${scenario.key ?? 'unknown'}`);
     }
     keys.add(scenario.key);
+    scenario.offers.forEach(validateCanonicalOffer);
   }
 }
 
