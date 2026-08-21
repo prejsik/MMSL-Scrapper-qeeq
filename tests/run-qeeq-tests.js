@@ -4088,3 +4088,32 @@ test('workflow actions are pinned to reviewed immutable commits', () => {
     assert.equal(revision, expected.get(action), `${action} must use its reviewed commit`);
   }
 });
+
+test('market view ranks the cheapest verified offer from each distinct provider', () => {
+  const { rankVerifiedProviders, buildScenarioMarketView } = require('../src/qeeq/marketView');
+  const offer = (provider_name, total_price, vehicle_name) => ({
+    record_type: 'offer', provider_name, total_price, daily_price: total_price / 2,
+    vehicle_name, currency: 'PLN', price_tier: 'public', price_verified: true
+  });
+  const offers = [
+    offer('Ace', 169, 'Fiesta'), offer(' ACE ', 171, 'Golf'), offer('Alamo', 180, 'Corsa'),
+    offer('Europcar', 190, 'Focus'), { ...offer('Hidden', 1, 'Bad'), price_verified: false }
+  ];
+  assert.deepEqual(rankVerifiedProviders(offers).map(item => item.provider_name), ['Ace', 'Alamo', 'Europcar']);
+  assert.deepEqual(buildScenarioMarketView({ offers }).top_3_providers.map(item => item.total_price), [169, 180, 190]);
+});
+
+test('market view recognizes QEEQ MM aliases and ranks MM outside Top 3', () => {
+  const { isMmCarsProvider, buildScenarioMarketView } = require('../src/qeeq/marketView');
+  assert.equal(isMmCarsProvider('Mm car rental'), true);
+  assert.equal(isMmCarsProvider('MM Cars Rental'), true);
+  assert.equal(isMmCarsProvider('MM Service Lease Polska'), true);
+  const offers = ['Ace', 'Alamo', 'Europcar', 'Mm car rental'].map((provider_name, index) => ({
+    record_type: 'offer', provider_name, total_price: 100 + index * 10, daily_price: 50 + index * 5,
+    vehicle_name: provider_name, currency: 'PLN', price_tier: 'public', price_verified: true
+  }));
+  const view = buildScenarioMarketView({ offers });
+  assert.equal(view.mm_provider_rank, 4);
+  assert.equal(view.cheaper_provider_count, 3);
+  assert.equal(view.mm_cars_rental.provider_name, 'Mm car rental');
+});
