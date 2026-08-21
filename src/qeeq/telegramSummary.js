@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const { buildMmAvailabilityAlert } = require('./mmAvailability');
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
 const BIDI_CONTROLS = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
@@ -132,6 +133,8 @@ function buildFinalSummary(payload, options) {
   ];
   if (failureCodes.length) lines.push(`Błędy: ${failureCodes.join(', ')}`);
   if (qualityCodes.length) lines.push(`Jakość — kody: ${qualityCodes.join(', ')}`);
+  const mmAlert = buildMmAvailabilityAlert(root);
+  if (mmAlert) lines.push(mmAlert);
   return [...lines, ...linkLines(options)].join('\n');
 }
 

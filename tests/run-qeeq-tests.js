@@ -2251,6 +2251,38 @@ test('Telegram final summary includes independent statuses, counts, safe codes, 
   assert.doesNotMatch(text, /artifacts\/2/);
 });
 
+function mmAvailabilityFixture() {
+  const publicOffer = provider_name => ({
+    record_type: 'offer', provider_name, total_price: 200, daily_price: 100,
+    currency: 'PLN', price_tier: 'public', price_verified: true
+  });
+  const scenario = (date, airport_key, rental_days, status, offers) => ({
+    key: `${airport_key}|${date}|${rental_days}`, airport_key, rental_days, status,
+    pickup_at: `${date}T10:00:00`, offers
+  });
+  return {
+    options: {
+      start_dates: ['2026-09-01', '2026-09-02', '2026-09-03'],
+      airport_keys: ['ktw', 'krk'], durations_days: [2]
+    },
+    scenarios: [
+      scenario('2026-09-01', 'ktw', 2, 'success', [publicOffer('MM Car Rental')]),
+      scenario('2026-09-01', 'krk', 2, 'failure', []),
+      scenario('2026-09-02', 'ktw', 2, 'success', [publicOffer('Ace')]),
+      scenario('2026-09-02', 'krk', 2, 'success', [publicOffer('Alamo')]),
+      scenario('2026-09-03', 'ktw', 2, 'success', [publicOffer('Ace')])
+    ]
+  };
+}
+
+test('Telegram final summary labels confirmed missing and incomplete MM evidence separately', () => {
+  const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
+  const message = buildFinalSummary(mmAvailabilityFixture(), {});
+  assert.match(message, /Brak MM - pelne dane\n- 2026-09-02/);
+  assert.match(message, /Nie mozna potwierdzic - niepelne dane\n- 2026-09-03/);
+  assert.doesNotMatch(message, /Brak MM - pelne dane\n- 2026-09-03/);
+});
+
 test('Telegram summaries reject unsafe links and sanitize hostile malformed inputs deterministically', () => {
   const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
   const hostile = { toString: null };
