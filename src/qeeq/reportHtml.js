@@ -1,19 +1,15 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { rankVerifiedPublicOffers, sanitizeDiagnosticText } = require('./utils');
+const { sanitizeDiagnosticText } = require('./utils');
+const { buildScenarioMarketView } = require('./marketView');
+const { classifyMmAvailability } = require('./mmAvailability');
 
 const STABLE_SEARCH_URL = 'https://www.qeeq.pl/car/search';
 const FORBIDDEN_DIAGNOSTIC = /(^|[?&#,;\s])(id|clid|_vv_|fpt|ticket|ts|qeeq_fpt|qeeq_city_id|qeeq_landmark_id|authorization|cookie)\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|[^&?#,;\s<>]+)/gi;
 
 function arrayOf(value) {
   return Array.isArray(value) ? value : [];
-}
-
-function isPlainObject(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
 }
 
 function safeDiagnostic(value) {
@@ -66,12 +62,25 @@ function priceCell(value, currency) {
 function topRow(offer, position, scenario) {
   const airport = display(scenario.iata || scenario.airport_key, '');
   const pickupDate = display(typeof scenario.pickup_at === 'string' ? scenario.pickup_at.slice(0, 10) : '', '');
-  return `<tr class="filterable-offer" data-airport="${escapeHtml(airport)}" data-pickup-date="${escapeHtml(pickupDate)}" data-duration="${escapeHtml(display(scenario.rental_days, ''))}" data-transmission="${escapeHtml(display(offer.transmission, ''))}" data-provider="${escapeHtml(display(offer.provider_name, ''))}" data-status="${escapeHtml(display(scenario.status, ''))}">
+  return `<tr class="filterable-offer" data-top-provider="${escapeHtml(display(offer.provider_name, ''))}" data-airport="${escapeHtml(airport)}" data-pickup-date="${escapeHtml(pickupDate)}" data-duration="${escapeHtml(display(scenario.rental_days, ''))}" data-transmission="${escapeHtml(display(offer.transmission, ''))}" data-provider="${escapeHtml(display(offer.provider_name, ''))}" data-status="${escapeHtml(display(scenario.status, ''))}">
     <td>${position}</td><td>${escapeHtml(display(scenario.iata || scenario.airport_key))}</td>
     <td>${escapeHtml(display(pickupDate))}</td>
     <td>${escapeHtml(display(scenario.rental_days))}</td><td>${escapeHtml(display(offer.provider_name))}</td>
     <td>${escapeHtml(display(offer.vehicle_name))}</td><td>${priceCell(offer.total_price, offer.currency)}</td>
     <td>${priceCell(offer.daily_price, offer.currency)}</td><td>${safeSourceLink(offer.source_search_url)}</td>
+  </tr>`;
+}
+
+function mmRow(scenario, availability) {
+  const view = buildScenarioMarketView(scenario);
+  const offer = view.mm_cars_rental;
+  const airport = display(scenario.iata || scenario.airport_key, '');
+  const pickupDate = display(typeof scenario.pickup_at === 'string' ? scenario.pickup_at.slice(0, 10) : '', '');
+  return `<tr data-mm-availability="${escapeHtml(availability)}">
+    <td>${escapeHtml(display(airport))}</td><td>${escapeHtml(display(pickupDate))}</td><td>${escapeHtml(display(scenario.rental_days))}</td>
+    <td>${escapeHtml(availability)}</td><td>${escapeHtml(display(offer?.provider_name))}</td><td>${escapeHtml(display(offer?.vehicle_name))}</td>
+    <td>${escapeHtml(display(view.mm_provider_rank))}</td><td>${escapeHtml(display(view.cheaper_provider_count))}</td>
+    <td>${priceCell(offer?.total_price, offer?.currency)}</td><td>${priceCell(offer?.daily_price, offer?.currency)}</td>
   </tr>`;
 }
 
@@ -119,7 +128,12 @@ function buildHtmlReport(payload = {}) {
   const root = payload && typeof payload === 'object' ? payload : {};
   const scenarios = arrayOf(root.scenarios).filter(scenario => scenario && typeof scenario === 'object');
   const allOffers = scenarios.flatMap(scenario => arrayOf(scenario.offers).filter(offer => offer && typeof offer === 'object'));
-  const topRows = scenarios.flatMap(scenario => rankVerifiedPublicOffers(arrayOf(scenario.offers).filter(isPlainObject)).slice(0, 3).map((offer, index) => topRow(offer, index + 1, scenario)));
+  const topRows = scenarios.flatMap(scenario => buildScenarioMarketView(scenario).top_3_providers.map((offer, index) => topRow(offer, index + 1, scenario)));
+  const mmAvailabilityByDate = new Map(classifyMmAvailability(root).dates.map(item => [item.pickup_date, item.status]));
+  const mmRows = scenarios.map(scenario => {
+    const pickupDate = typeof scenario.pickup_at === 'string' ? scenario.pickup_at.slice(0, 10) : '';
+    return mmRow(scenario, mmAvailabilityByDate.get(pickupDate) || 'incomplete');
+  });
   const qualityWarnings = unique([
     ...arrayOf(root.quality?.quality_errors),
     ...scenarios.flatMap(scenario => arrayOf(scenario.quality_errors)),
@@ -151,6 +165,7 @@ function buildHtmlReport(payload = {}) {
     <label>Status<select id="filter-status">${optionList(scenarios.map(scenario => scenario.status))}</select></label>
   </nav>
   <section id="top3"><h2>Top 3 zweryfikowanych cen publicznych</h2>${topRows.length ? `<div class="table-wrap"><table><thead><tr><th>#</th><th>Lotnisko</th><th>Data</th><th>Dni</th><th>Dostawca</th><th>Pojazd</th><th>Suma</th><th>Dziennie</th><th>Źródło</th></tr></thead><tbody>${topRows.join('')}</tbody></table></div>` : '<p>Brak zweryfikowanych cen publicznych.</p>'}</section>
+  <section id="mm-cars-rental"><h2>MM Cars Rental</h2>${mmRows.length ? `<div class="table-wrap"><table><thead><tr><th>Lotnisko</th><th>Data</th><th>Dni</th><th>Dostępność</th><th>Dostawca</th><th>Pojazd</th><th>Pozycja</th><th>Tańsi dostawcy</th><th>Suma</th><th>Dziennie</th></tr></thead><tbody>${mmRows.join('')}</tbody></table></div>` : '<p>Brak scenariuszy.</p>'}</section>
   <section id="details"><h2>Pełne szczegóły</h2>${scenarios.length ? scenarios.map(scenarioDetails).join('') : '<p class="empty">Brak scenariuszy.</p>'}</section>
 </main><script>${script}</script></body></html>\n`;
 }

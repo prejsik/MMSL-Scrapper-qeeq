@@ -1945,7 +1945,40 @@ test('HTML ignores malformed ranked offers and non-string pickup timestamps', ()
   assert.match(buildHtmlReport(payload), /<td>—<\/td>/);
 });
 
-test('XLSX contains seven usable sheets with typed verified and conditional price fields', async () => {
+function marketReportFixture() {
+  return {
+    run_status: 'success', quality_status: 'pass',
+    options: { start_dates: ['2026-09-19'], airport_keys: ['katowice-pyrzowice'], durations_days: [2] },
+    scenarios: [{
+      key: 'ktw:2026-09-19:2', status: 'success', airport_key: 'katowice-pyrzowice', iata: 'KTW', pickup_at: '2026-09-19T10:00:00', rental_days: 2,
+      offers: [
+        { provider_name: 'Ace', vehicle_name: 'Fiesta', total_price: 100, daily_price: 50, currency: 'PLN', price_tier: 'public', price_verified: true },
+        { provider_name: 'Ace', vehicle_name: 'Focus', total_price: 105, daily_price: 52.5, currency: 'PLN', price_tier: 'public', price_verified: true },
+        { provider_name: 'Alamo', vehicle_name: 'Corsa', total_price: 110, daily_price: 55, currency: 'PLN', price_tier: 'public', price_verified: true },
+        { provider_name: 'Europcar', vehicle_name: 'Golf', total_price: 120, daily_price: 60, currency: 'PLN', price_tier: 'public', price_verified: true },
+        { provider_name: 'MM Cars Rental', vehicle_name: 'Octavia', total_price: 130, daily_price: 65, currency: 'PLN', price_tier: 'public', price_verified: true }
+      ]
+    }]
+  };
+}
+
+test('HTML and XLSX use distinct-provider Top 3 and expose MM rank separately', async () => {
+  const { buildHtmlReport } = require('../src/qeeq/reportHtml');
+  const { buildWorkbook } = require('../src/qeeq/reportXlsx');
+  const payload = marketReportFixture();
+  const html = buildHtmlReport(payload);
+  assert.equal((html.match(/data-top-provider="Ace"/g) || []).length, 1);
+  assert.match(html, /MM Cars Rental.*Pozycja.*4/s);
+  const workbook = await buildWorkbook(payload);
+  assert.deepEqual(workbook.worksheets.map(sheet => sheet.name), [
+    'Overview', 'Top 3', 'By airport', 'By duration', 'Providers', 'Details', 'MM Cars Rental', 'Data quality'
+  ]);
+  assert.equal(workbook.getWorksheet('Top 3').getCell('F2').value, 'Ace');
+  assert.equal(workbook.getWorksheet('Top 3').getCell('F3').value, 'Alamo');
+  assert.equal(workbook.getWorksheet('MM Cars Rental').getCell('F2').value, 4);
+});
+
+test('XLSX contains eight usable sheets with typed verified and conditional price fields', async () => {
   const { buildDetailRows, buildWorkbook } = require('../src/qeeq/reportXlsx');
   const payload = {
     run_status: 'partial', quality_status: 'warning', expected_checks: 2, completed_checks: 1, failed_checks: 1,
@@ -1969,7 +2002,7 @@ test('XLSX contains seven usable sheets with typed verified and conditional pric
   assert.equal(detailRows[4]['Diamond/member total'], 98);
 
   const workbook = await buildWorkbook(payload);
-  assert.deepEqual(workbook.worksheets.map(sheet => sheet.name), ['Overview', 'Top 3', 'By airport', 'By duration', 'Providers', 'Details', 'Data quality']);
+  assert.deepEqual(workbook.worksheets.map(sheet => sheet.name), ['Overview', 'Top 3', 'By airport', 'By duration', 'Providers', 'Details', 'MM Cars Rental', 'Data quality']);
   for (const sheet of workbook.worksheets) {
     assert.equal(sheet.views[0].state, 'frozen');
     assert.equal(sheet.views[0].ySplit, 1);
@@ -2052,7 +2085,7 @@ test('XLSX exposes exact interfaces and CLI writes a same-directory atomic file 
     assert.equal(made.status, 0);
     const loaded = new ExcelJS.Workbook();
     await loaded.xlsx.readFile(output);
-    assert.deepEqual(loaded.worksheets.map(sheet => sheet.name), ['Overview', 'Top 3', 'By airport', 'By duration', 'Providers', 'Details', 'Data quality']);
+    assert.deepEqual(loaded.worksheets.map(sheet => sheet.name), ['Overview', 'Top 3', 'By airport', 'By duration', 'Providers', 'Details', 'MM Cars Rental', 'Data quality']);
     assert.deepEqual(fs.readdirSync(path.dirname(output)), ['report.xlsx']);
 
     fs.writeFileSync(input, JSON.stringify({ run_status: 'partial', quality_status: 'warning', scenarios: [] }));
