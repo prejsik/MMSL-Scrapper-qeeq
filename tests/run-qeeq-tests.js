@@ -3237,6 +3237,7 @@ test('scenario failures write bounded sanitized artifacts before cleanup and pre
   const path = require('node:path');
   const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
   const { QeeqScraper } = require('../src/qeeq/scraper');
+  fs.mkdirSync(path.join(process.cwd(), 'output'), { recursive: true });
   const root = fs.mkdtempSync(path.join(process.cwd(), 'output', 'qeeq-failure-artifacts-'));
   const artifactsDir = path.relative(process.cwd(), root);
   const order = [];
@@ -3336,6 +3337,7 @@ test('safe visible DOM and stable current URL are recorded with safe artifact re
   const fs = require('node:fs');
   const path = require('node:path');
   const { createFailureArtifactSession } = require('../src/qeeq/diagnostics');
+  fs.mkdirSync(path.join(process.cwd(), 'output'), { recursive: true });
   const root = fs.mkdtempSync(path.join(process.cwd(), 'output', 'qeeq-safe-artifacts-'));
   const listeners = new Map();
   const page = {
@@ -3596,6 +3598,7 @@ test('shared diagnostics redact unlabelled opaque tokens in HTML and failure fil
   assert.match(html, /location_id_drift/);
   assert.doesNotMatch(html, new RegExp(token));
 
+  fs.mkdirSync(path.join(process.cwd(), 'output'), { recursive: true });
   const root = fs.mkdtempSync(path.join(process.cwd(), 'output', 'qeeq-token-artifacts-'));
   const listeners = new Map();
   const page = {
