@@ -484,7 +484,7 @@ function parseOfferSnapshot(snapshot, context = {}, providerMetadata = new Map()
     ? details.explicitCurrencies
     : [details.currency]);
   if (auxiliaryCurrencies.some(currency => currency !== 'PLN')) qualityErrors.push('unexpected_currency');
-  if ([deposit, reference].filter(Boolean).some(details => details.explicitCurrencies.length > 1)) qualityErrors.push('unexpected_currency');
+  if ([deposit, reference].filter(Boolean).some(details => new Set(details.explicitCurrencies).size > 1)) qualityErrors.push('unexpected_currency');
   if (discountMismatch) qualityErrors.push('discount_type_mismatch');
   if (qualityErrors.length) result.quality_errors = [...new Set(qualityErrors)];
   return result;
@@ -660,6 +660,10 @@ function isObservedListResponse(response) {
   return method === 'GET' && OBSERVED_LIST_PATHS.has(responsePath(response));
 }
 
+function isObservedListRequest(request) {
+  return request?.method?.() === 'GET' && OBSERVED_LIST_PATHS.has(responsePath(request));
+}
+
 function supportedListPayload(payload) {
   return Boolean(payload && typeof payload === 'object' && Array.isArray(payload.data?.list) && Array.isArray(payload.data?.shops));
 }
@@ -733,6 +737,86 @@ function observeListResponses(page, timeoutMs, nowMillis = Date.now) {
       } finally {
         dispose();
       }
+    },
+    dispose
+  };
+}
+
+function collectListResponsesWhileAttached(page, timeoutMs) {
+  const responsePromises = [];
+  const pendingRequests = new Set();
+  const activityWaiters = new Set();
+  let activityVersion = 0;
+  let detached = false;
+  const signalActivity = () => {
+    activityVersion += 1;
+    for (const wake of activityWaiters) wake();
+  };
+  const listener = response => {
+    if (!isObservedListResponse(response)) return;
+    try {
+      responsePromises.push(Promise.resolve(response.json()).catch(() => null));
+    } catch {
+      responsePromises.push(Promise.resolve(null));
+    }
+    signalActivity();
+  };
+  const requestListener = request => {
+    if (!isObservedListRequest(request)) return;
+    pendingRequests.add(request);
+    signalActivity();
+  };
+  const requestDoneListener = request => {
+    if (pendingRequests.delete(request)) signalActivity();
+  };
+  page.on('response', listener);
+  page.on('request', requestListener);
+  page.on('requestfinished', requestDoneListener);
+  page.on('requestfailed', requestDoneListener);
+  const waitForActivity = waitMs => new Promise(resolve => {
+    let timer;
+    const wake = () => {
+      clearTimeout(timer);
+      activityWaiters.delete(wake);
+      resolve();
+    };
+    timer = setTimeout(wake, waitMs);
+    activityWaiters.add(wake);
+  });
+  const dispose = () => {
+    if (detached) return;
+    detached = true;
+    page.off?.('response', listener);
+    page.off?.('request', requestListener);
+    page.off?.('requestfinished', requestDoneListener);
+    page.off?.('requestfailed', requestDoneListener);
+    for (const wake of activityWaiters) wake();
+  };
+  return {
+    async finish() {
+      const deadline = Date.now() + timeoutMs;
+      const quietMs = Math.min(250, timeoutMs);
+      let quietStartedAt = Date.now();
+      while (!detached) {
+        const versionBeforeWait = activityVersion;
+        const now = Date.now();
+        const quietRemaining = quietMs - (now - quietStartedAt);
+        if (pendingRequests.size === 0 && quietRemaining <= 0) break;
+        const waitMs = Math.min(deadline - now, pendingRequests.size ? deadline - now : quietRemaining);
+        if (waitMs <= 0) break;
+        await waitForActivity(waitMs);
+        if (activityVersion !== versionBeforeWait) quietStartedAt = Date.now();
+      }
+      dispose();
+      const remainingMs = Math.max(1, deadline - Date.now());
+      const candidates = await Promise.all(responsePromises.map(promise => withTimeout(promise, remainingMs)));
+      const payloads = [];
+      const qualityErrors = [];
+      for (const candidate of candidates) {
+        if (typeof candidate !== 'symbol' && supportedListPayload(candidate)) payloads.push(candidate);
+        else qualityErrors.push('network_schema_unrecognized');
+      }
+      return { payloads, qualityErrors: [...new Set(qualityErrors)] };
     },
     dispose
   };
@@ -819,7 +903,7 @@ async function expandAllResults(page, config, sleep) {
   return qualityErrors;
 }
 
-async function extractResults(page, scenario, config, providerMetadata, sourceSearchUrl, capturedAt, sleep) {
+async function extractResults(page, scenario, config, providerMetadata, sourceSearchUrl, capturedAt, sleep, providerObservation = null) {
   const groups = [];
   const offers = [];
   const groupLocators = page.locator(SELECTORS.group);
@@ -827,66 +911,91 @@ async function extractResults(page, scenario, config, providerMetadata, sourceSe
   const groupLimit = Math.min(groupCount, config.maxVehicleGroupsPerScenario ?? 300);
   const offerLimit = config.maxOffersPerScenario ?? 1500;
   const qualityErrors = groupCount > groupLimit ? ['vehicle_group_limit_reached'] : [];
+  const collectedCandidates = [];
 
   for (let index = 0; index < groupLimit; index += 1) {
+    if (collectedCandidates.length >= offerLimit) break;
     const groupLocator = groupLocators.nth(index);
     const vehicleName = await locatorText(groupLocator.locator(SELECTORS.vehicleName));
     const supplierButton = groupLocator.locator(SELECTORS.supplierButton);
     let vehicle = { vehicleName, transmission: null, seats: null, doors: null, luggage: null };
     let diagnostic = parseGroupSnapshot(vehicle, scenario);
-    const isOpen = await groupLocator.evaluate((element, selector) => element.matches(selector), SELECTORS.openGroup);
-    if (!isOpen) {
-      const visibleSupplierButton = await firstVisibleLocator(supplierButton);
-      if (!visibleSupplierButton) {
+    {
+      const isOpen = await groupLocator.evaluate((element, selector) => element.matches(selector), SELECTORS.openGroup);
+      if (!isOpen) {
+        const visibleSupplierButton = await firstVisibleLocator(supplierButton);
+        if (!visibleSupplierButton) {
+          diagnostic = { ...diagnostic, quality_errors: ['group_expansion_timeout'] };
+          qualityErrors.push('group_expansion_timeout');
+          groups.push(diagnostic);
+          continue;
+        }
+        await visibleSupplierButton.click();
+      }
+
+      const anchors = groupLocator.locator(SELECTORS.reserveAnchor);
+      if (!await pollForVisible(anchors, config.resultsTimeoutMs ?? 30000, sleep)) {
         diagnostic = { ...diagnostic, quality_errors: ['group_expansion_timeout'] };
         qualityErrors.push('group_expansion_timeout');
         groups.push(diagnostic);
         continue;
       }
-      await visibleSupplierButton.click();
-    }
+      const candidates = [];
+      for (let offerIndex = 0; offerIndex < await anchors.count(); offerIndex += 1) {
+        if (collectedCandidates.length + candidates.length >= offerLimit) {
+          qualityErrors.push('offer_limit_reached');
+          break;
+        }
+        const anchor = anchors.nth(offerIndex);
+        if (!await anchor.isVisible()) continue;
+        const snapshot = await readOfferSnapshot(anchor);
+        if (!snapshot) {
+          diagnostic = { ...diagnostic, quality_errors: [...new Set([...(diagnostic.quality_errors || []), 'price_unverified'])] };
+          qualityErrors.push('price_unverified');
+          continue;
+        }
+        vehicle = {
+          vehicleName,
+          transmission: snapshot.transmission,
+          seats: snapshot.seats,
+          doors: snapshot.doors,
+          luggage: snapshot.luggage
+        };
+        diagnostic = {
+          ...parseGroupSnapshot(vehicle, scenario),
+          ...(diagnostic.quality_errors ? { quality_errors: diagnostic.quality_errors } : {})
+        };
+        candidates.push({ snapshot, vehicle, groupIndex: groups.length });
+      }
 
-    const anchors = groupLocator.locator(SELECTORS.reserveAnchor);
-    if (!await pollForVisible(anchors, config.resultsTimeoutMs ?? 30000, sleep)) {
-      diagnostic = { ...diagnostic, quality_errors: ['group_expansion_timeout'] };
-      qualityErrors.push('group_expansion_timeout');
-      groups.push(diagnostic);
-      continue;
-    }
-    for (let offerIndex = 0; offerIndex < await anchors.count(); offerIndex += 1) {
-      const anchor = anchors.nth(offerIndex);
-      if (!await anchor.isVisible()) continue;
-      if (offers.length >= offerLimit) {
-        qualityErrors.push('offer_limit_reached');
-        break;
-      }
-      const snapshot = await readOfferSnapshot(anchor);
-      if (!snapshot) {
-        diagnostic = { ...diagnostic, quality_errors: [...new Set([...(diagnostic.quality_errors || []), 'price_unverified'])] };
-        qualityErrors.push('price_unverified');
-        continue;
-      }
-      vehicle = {
-        vehicleName,
-        transmission: snapshot.transmission,
-        seats: snapshot.seats,
-        doors: snapshot.doors,
-        luggage: snapshot.luggage
-      };
-      diagnostic = {
-        ...parseGroupSnapshot(vehicle, scenario),
-        ...(diagnostic.quality_errors ? { quality_errors: diagnostic.quality_errors } : {})
-      };
-      const parsed = parseOfferSnapshot(snapshot, { rentalDays: scenario.rentalDays, vehicle }, providerMetadata);
-      if (parsed.record_type === 'offer') {
-        offers.push({ ...parsed, source_search_url: sourceSearchUrl, captured_at: capturedAt });
-      } else {
-        diagnostic = { ...diagnostic, quality_errors: [...new Set([...(diagnostic.quality_errors || []), ...(parsed.quality_errors || [])])] };
-        qualityErrors.push(...(parsed.quality_errors || []));
-      }
+      collectedCandidates.push(...candidates);
     }
     groups.push(diagnostic);
-    if (offers.length >= offerLimit) break;
+    if (collectedCandidates.length >= offerLimit) {
+      if (index + 1 < groupLimit) qualityErrors.push('offer_limit_reached');
+      break;
+    }
+  }
+
+  if (providerObservation?.finish) {
+    const observed = await providerObservation.finish();
+    const observationErrors = providerObservation.accept?.(observed);
+    if (Array.isArray(observationErrors)) qualityErrors.push(...observationErrors);
+  }
+
+  for (const { snapshot, vehicle, groupIndex } of collectedCandidates) {
+    if (offers.length >= offerLimit) {
+      qualityErrors.push('offer_limit_reached');
+      break;
+    }
+    const parsed = parseOfferSnapshot(snapshot, { rentalDays: scenario.rentalDays, vehicle }, providerMetadata);
+    if (parsed.record_type === 'offer') {
+      offers.push({ ...parsed, source_search_url: sourceSearchUrl, captured_at: capturedAt });
+    } else {
+      const diagnostic = groups[groupIndex] || parseGroupSnapshot(vehicle, scenario);
+      groups[groupIndex] = { ...diagnostic, quality_errors: [...new Set([...(diagnostic.quality_errors || []), ...(parsed.quality_errors || [])])] };
+      qualityErrors.push(...(parsed.quality_errors || []));
+    }
   }
   return { groups, offers, qualityErrors: [...new Set(qualityErrors)] };
 }
@@ -937,6 +1046,7 @@ class QeeqScraper {
     let context;
     let page;
     let observation;
+    let providerResponseCollection;
     let result;
     let selectedAirport;
     let operationError = null;
@@ -972,13 +1082,30 @@ class QeeqScraper {
       await page.waitForSelector(SELECTORS.group, { timeout: this.config.resultsTimeoutMs ?? 60000 });
       const sourceSearchUrl = sanitizeSourceUrl(page.url());
       await observation.settle();
+      providerResponseCollection = collectListResponsesWhileAttached(
+        page,
+        this.config.apiObservationTimeoutMs ?? 30000
+      );
       const qualityErrors = selectedAirport.qualityWarning ? [selectedAirport.qualityWarning.code] : [];
       qualityErrors.push(...await expandAllResults(page, this.config, this.sleep));
       const observed = await observation.finish();
-      const providerMetadata = mergeObservedProviderMetadata(observed.payloads);
+      const providerPayloads = [...observed.payloads];
+      const providerMetadata = mergeObservedProviderMetadata(providerPayloads);
       qualityErrors.unshift(...observed.qualityErrors);
       const capturedAt = new Date(this.now()).toISOString();
-      const extracted = await extractResults(page, scenario, this.config, providerMetadata, sourceSearchUrl, capturedAt, this.sleep);
+      const extracted = await extractResults(
+        page, scenario, this.config, providerMetadata, sourceSearchUrl, capturedAt, this.sleep,
+        {
+          finish: () => providerResponseCollection.finish(),
+          accept: expansionObserved => {
+            providerPayloads.push(...expansionObserved.payloads);
+            const refreshed = mergeObservedProviderMetadata(providerPayloads);
+            providerMetadata.clear();
+            for (const [key, candidates] of refreshed) providerMetadata.set(key, candidates);
+            return expansionObserved.qualityErrors;
+          }
+        }
+      );
       qualityErrors.push(...extracted.qualityErrors);
       result = {
         key: scenario.key,
@@ -1003,6 +1130,11 @@ class QeeqScraper {
     }
     try {
       observation?.dispose();
+    } catch (error) {
+      operationError ||= error;
+    }
+    try {
+      providerResponseCollection?.dispose();
     } catch (error) {
       operationError ||= error;
     }

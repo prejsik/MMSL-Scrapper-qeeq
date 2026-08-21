@@ -841,6 +841,133 @@ test('API observation continues from an early unknown response to a later suppor
   assert.equal(fake.responseListeners, 0);
 });
 
+test('provider observation includes metadata loaded by supplier expansion', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({
+    loadMoreCounts: [1],
+    responseSequence: [{
+      url: 'https://www.qeeq.pl/car-api/search/list?page=initial',
+      payload: { data: { list: [], shops: [] } }
+    }],
+    supplierButtonResponseSequence: [{
+      url: 'https://www.qeeq.pl/revision/search/getListAsyncInfo?page=expanded',
+      payload: apiFixture
+    }]
+  });
+
+  const outcome = await new QeeqScraper(task5Config(), {
+    launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep
+  }).runScenario(task5Scenario());
+  assert.equal(outcome.status, 'success');
+  assert.equal(outcome.offers.length, 1);
+  assert.equal(outcome.offers[0].provider_name, 'CARWIZ');
+  assert.equal(outcome.quality_errors.includes('provider_unresolved'), false);
+  assert.equal(fake.responseListeners, 0);
+});
+
+test('provider observation waits for metadata arriving after the last supplier click', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({
+    loadMoreCounts: [1],
+    responseSequence: [{
+      url: 'https://www.qeeq.pl/car-api/search/list?page=initial',
+      payload: { data: { list: [], shops: [] } }
+    }],
+    supplierButtonResponseSequence: [{
+      url: 'https://www.qeeq.pl/revision/search/getListAsyncInfo?page=delayed',
+      payload: apiFixture,
+      emitDelayMs: 300
+    }]
+  });
+
+  const outcome = await new QeeqScraper(task5Config({ apiObservationTimeoutMs: 500 }), {
+    launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep
+  }).runScenario(task5Scenario());
+  assert.equal(outcome.status, 'success');
+  assert.equal(outcome.offers.length, 1);
+  assert.equal(outcome.offers[0].provider_name, 'CARWIZ');
+  assert.equal(outcome.quality_errors.includes('provider_unresolved'), false);
+  assert.equal(fake.responseListeners, 0);
+});
+
+test('offer limit bounds supplier expansion work before deferred parsing', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({ loadMoreCounts: [3], supplierGroupCount: 3 });
+
+  const outcome = await new QeeqScraper(task5Config({ maxOffersPerScenario: 1 }), {
+    launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep
+  }).runScenario(task5Scenario());
+  assert.equal(outcome.status, 'success');
+  assert.equal(outcome.offers.length, 1);
+  assert.equal(fake.supplierButtonClicks, 1);
+  assert.equal(fake.responseListeners, 0);
+});
+
+test('later supplier metadata resolves snapshots collected from earlier groups', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const fake = createFakeQeeqBrowser({
+    loadMoreCounts: [2],
+    supplierGroupCount: 2,
+    responseSequence: [{
+      url: 'https://www.qeeq.pl/car-api/search/list?page=initial',
+      payload: { data: { list: [], shops: [] } }
+    }],
+    supplierButtonResponseSequences: [[], [{
+      url: 'https://www.qeeq.pl/car-api/search/list?page=later-group',
+      payload: apiFixture
+    }]]
+  });
+
+  const outcome = await new QeeqScraper(task5Config({ apiObservationTimeoutMs: 50 }), {
+    launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep
+  }).runScenario(task5Scenario());
+  assert.equal(outcome.status, 'success');
+  assert.equal(outcome.offers.length, 2);
+  assert.deepEqual(outcome.offers.map(offer => offer.provider_name), ['CARWIZ', 'CARWIZ']);
+  assert.equal(outcome.quality_errors.includes('provider_unresolved'), false);
+  assert.equal(fake.responseListeners, 0);
+});
+
+test('provider collection keeps late metadata needed only by an earlier group', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const domFixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const laterIdentity = { businessId: '2400002', businessBid: 'later-bid' };
+  const initialPayload = JSON.parse(JSON.stringify(apiFixture));
+  initialPayload.data.list[0].meal_list[0].id = laterIdentity.businessId;
+  initialPayload.data.list[0].meal_list[0].bid = laterIdentity.businessBid;
+  const fake = createFakeQeeqBrowser({
+    loadMoreCounts: [2],
+    supplierGroupCount: 2,
+    reserveIdentities: [domFixture.offer, laterIdentity],
+    responseSequence: [{
+      url: 'https://www.qeeq.pl/car-api/search/list?page=initial-later-group',
+      payload: initialPayload
+    }],
+    supplierButtonResponseSequences: [[], [{
+      url: 'https://www.qeeq.pl/car-api/search/list?page=late-earlier-group',
+      payload: apiFixture
+    }]]
+  });
+
+  const outcome = await new QeeqScraper(task5Config({ apiObservationTimeoutMs: 50 }), {
+    launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep
+  }).runScenario(task5Scenario());
+  assert.equal(outcome.status, 'success');
+  assert.equal(outcome.offers.length, 2);
+  assert.deepEqual(outcome.offers.map(offer => offer.provider_name), ['CARWIZ', 'CARWIZ']);
+  assert.equal(outcome.quality_errors.includes('provider_unresolved'), false);
+  assert.equal(fake.responseListeners, 0);
+});
+
 test('API observation uses one absolute budget across all JSON responses', async () => {
   const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
   const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
@@ -3847,6 +3974,23 @@ test('deposit and reference price retain their own currencies and quality eviden
   assert.deepEqual(merged.quality.quality_errors, ['unexpected_currency']);
 });
 
+test('a PLN deposit range does not create false mixed-currency evidence', () => {
+  const domFixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { parseObservedListPayload, parseOfferSnapshot } = require('../src/qeeq/scraper');
+  const providers = parseObservedListPayload(apiFixture);
+  const offer = parseOfferSnapshot({
+    ...domFixture.offer,
+    displayedAmount: '119 zł', diamondAmount: null, discountType: null,
+    depositText: 'Depozyt: 3 055,55 zł-8 730,15 zł',
+    rentalPeriodText: 'łącznie za 2 dni'
+  }, { rentalDays: 2, vehicle: domFixture.vehicle }, providers);
+
+  assert.equal(offer.deposit_amount, 3055.55);
+  assert.equal(offer.deposit_currency, 'PLN');
+  assert.deepEqual(offer.quality_errors, []);
+});
+
 test('reports render the reference price with its own currency', () => {
   const { buildCsv } = require('../src/qeeq/report');
   const { buildHtmlReport } = require('../src/qeeq/reportHtml');
@@ -3918,4 +4062,26 @@ test('daily workflow grants Pages and OIDC permissions only to the pages job', (
   assert.equal((yaml.match(/pages: write/g) || []).length, 1);
   assert.equal((yaml.match(/id-token: write/g) || []).length, 1);
   assert.doesNotMatch(smoke, /pages: write|id-token: write/);
+});
+
+test('workflow actions are pinned to reviewed immutable commits', () => {
+  const fs = require('node:fs');
+  const expected = new Map([
+    ['actions/checkout', '11d5960a326750d5838078e36cf38b85af677262'],
+    ['actions/setup-node', '49933ea5288caeca8642d1e84afbd3f7d6820020'],
+    ['actions/upload-artifact', 'ea165f8d65b6e75b540449e92b4886f43607fa02'],
+    ['actions/download-artifact', 'd3f86a106a0bac45b974a628896c90dbdf5c8093'],
+    ['actions/configure-pages', '983d7736d9b0ae728b81ab479565c72886d7745b'],
+    ['actions/upload-pages-artifact', '56afc609e74202658d3ffba0e8f6dda462b719fa'],
+    ['actions/deploy-pages', 'd6db90164ac5ed86f2b6aed7e0febac5b3c0c03e']
+  ]);
+  const workflowText = ['.github/workflows/qeeq-smoke.yml', '.github/workflows/qeeq-daily.yml']
+    .map(file => fs.readFileSync(file, 'utf8'))
+    .join('\n');
+  const uses = [...workflowText.matchAll(/uses:\s+([^@\s]+)@([^\s#]+)/g)];
+
+  assert.equal(uses.length, 23);
+  for (const [, action, revision] of uses) {
+    assert.equal(revision, expected.get(action), `${action} must use its reviewed commit`);
+  }
 });

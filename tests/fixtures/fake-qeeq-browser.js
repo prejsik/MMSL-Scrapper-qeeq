@@ -62,6 +62,7 @@ function createFakeQeeqBrowser(options = {}) {
       payload: options.networkPayload || apiFixture,
       url: options.networkUrl || 'https://www.qeeq.pl/car-api/search/list?page=1'
     }],
+    supplierButtonResponseSequence: options.supplierButtonResponseSequence || [],
     hiddenValueOverrides: options.hiddenValueOverrides || {},
     failSessions: new Set(options.failSessions || []),
     pages: [],
@@ -105,8 +106,8 @@ function createFakeQeeqBrowser(options = {}) {
       if (this.kind === 'profile') return state.primaryProfileControls ? (state.hiddenFirstControls ? 2 : 1) : 0;
       if (this.kind === 'semanticProfile') return state.primaryProfileControls ? 0 : (state.hiddenFirstControls ? 2 : 1);
       if (this.kind === 'groups') return state.currentGroupCount;
-      if (this.kind === 'supplierButton') return this.data.index === 0 ? 1 : 0;
-      if (this.kind === 'reserveAnchor') return this.data.index === 0 && this.page.groupOpen ? 1 : 0;
+      if (this.kind === 'supplierButton') return this.data.groupIndex < (options.supplierGroupCount ?? 1) ? 1 : 0;
+      if (this.kind === 'reserveAnchor') return this.data.groupIndex < (options.supplierGroupCount ?? 1) && this.page.openGroups.has(this.data.groupIndex) ? 1 : 0;
       if (this.kind === 'referencePrice') return 0;
       return 1;
     }
@@ -138,9 +139,9 @@ function createFakeQeeqBrowser(options = {}) {
     }
 
     locator(selector) {
-      if (this.kind === 'group' && selector === SELECTORS.vehicleName) return new FakeLocator(this.page, 'vehicleName', this.data);
-      if (this.kind === 'group' && selector === SELECTORS.supplierButton) return new FakeLocator(this.page, 'supplierButton', this.data);
-      if (this.kind === 'group' && selector === SELECTORS.reserveAnchor) return new FakeLocator(this.page, 'reserveAnchor', this.data);
+      if (this.kind === 'group' && selector === SELECTORS.vehicleName) return new FakeLocator(this.page, 'vehicleName', { groupIndex: this.data.index });
+      if (this.kind === 'group' && selector === SELECTORS.supplierButton) return new FakeLocator(this.page, 'supplierButton', { groupIndex: this.data.index });
+      if (this.kind === 'group' && selector === SELECTORS.reserveAnchor) return new FakeLocator(this.page, 'reserveAnchor', { groupIndex: this.data.index });
       if (this.kind === 'reserveAnchor' && selector.startsWith('xpath=ancestor::')) return new FakeLocator(this.page, 'offerSubtree', this.data);
       if (this.kind === 'offerSubtree' && selector === SELECTORS.supplierInfo) return new FakeLocator(this.page, 'supplierInfo', this.data);
       if (this.kind === 'offerSubtree' && selector === SELECTORS.supplierRating) return new FakeLocator(this.page, 'supplierRating', this.data);
@@ -192,8 +193,12 @@ function createFakeQeeqBrowser(options = {}) {
       }
       if (this.kind === 'supplierButton') {
         state.supplierButtonClicks += 1;
-        this.page.groupOpen = true;
+        this.page.openGroups.add(this.data.groupIndex);
         this.page.expansionPollsRemaining = options.expansionDelayPolls || 0;
+        const responseSequence = Array.isArray(options.supplierButtonResponseSequences)
+          ? options.supplierButtonResponseSequences[this.data.groupIndex] || []
+          : state.supplierButtonResponseSequence;
+        await this.page.emitResponses(responseSequence);
       }
       if (this.kind === 'loadMore') {
         state.loadMoreClicks += 1;
@@ -223,7 +228,7 @@ function createFakeQeeqBrowser(options = {}) {
 
     async innerText() {
       if (this.kind === 'suggestion') return `${this.data.label} (${this.data.iata})`;
-      if (this.kind === 'vehicleName') return this.data.index === 0 ? domFixture.vehicle.vehicleName : `Vehicle ${this.data.index + 1}`;
+      if (this.kind === 'vehicleName') return this.data.groupIndex === 0 ? domFixture.vehicle.vehicleName : `Vehicle ${this.data.groupIndex + 1}`;
       if (this.kind === 'supplierInfo') return 'CARWIZ 8.5 (120)';
       if (this.kind === 'supplierRating') return '8.5 (120)';
       if (this.kind === 'displayedPrice') return domFixture.offer.displayedAmount;
@@ -246,17 +251,18 @@ function createFakeQeeqBrowser(options = {}) {
         if (name === 'data-data-type') return this.data.dataType || null;
         if (name === 'type') return this.data.type || null;
       }
-      if (this.kind === 'group' && name === 'class') return this.page.groupOpen && this.data.index === 0 ? 'car-group-item___x group-open___x' : 'car-group-item___x';
+      if (this.kind === 'group' && name === 'class') return this.page.openGroups.has(this.data.index) ? 'car-group-item___x group-open___x' : 'car-group-item___x';
       if (this.kind === 'reserveAnchor') {
-        if (name === 'id') return domFixture.offer.businessId;
-        if (name === 'bid') return domFixture.offer.businessBid;
-        if (name === 'list_discount_type') return domFixture.offer.discountType;
+        const identity = options.reserveIdentities?.[this.data.groupIndex] || domFixture.offer;
+        if (name === 'id') return identity.businessId;
+        if (name === 'bid') return identity.businessBid;
+        if (name === 'list_discount_type') return identity.discountType ?? domFixture.offer.discountType;
       }
       return null;
     }
 
     async evaluate(_callback, selector) {
-      if (this.kind === 'group' && selector === SELECTORS.openGroup) return this.page.groupOpen && this.data.index === 0;
+      if (this.kind === 'group' && selector === SELECTORS.openGroup) return this.page.openGroups.has(this.data.index);
       return false;
     }
   }
@@ -267,7 +273,7 @@ function createFakeQeeqBrowser(options = {}) {
       this.listeners = new Map();
       this.currentUrl = 'about:blank';
       this.sameLocation = false;
-      this.groupOpen = options.initiallyOpen === true;
+      this.openGroups = new Set(options.initiallyOpen === true ? [0] : []);
       this.expansionPollsRemaining = 0;
       this.pickupQuery = null;
       this.autocompletePollsRemaining = 0;
@@ -359,23 +365,21 @@ function createFakeQeeqBrowser(options = {}) {
       const handlers = this.listeners.get(event) || [];
       handlers.push(handler);
       this.listeners.set(event, handlers);
-      state.responseListeners = handlers.length;
+      if (event === 'response') state.responseListeners = handlers.length;
     }
 
     off(event, handler) {
       const handlers = this.listeners.get(event) || [];
       this.listeners.set(event, handlers.filter(candidate => candidate !== handler));
-      state.responseListeners = this.listeners.get(event).length;
+      if (event === 'response') state.responseListeners = this.listeners.get(event).length;
     }
 
-    async submit() {
-      state.submitted = true;
-      state.responseListenerAttachedBeforeSubmit = (this.listeners.get('response') || []).length > 0;
-      const emit = entry => {
+    async emitResponses(sequence) {
+      const emit = (entry, request) => {
         state.observedRequestUrls.push(entry.url);
         const response = {
           url: () => entry.url,
-          request: () => ({ method: () => 'GET' }),
+          request: () => request,
           json: async () => {
             state.clockMs += entry.jsonCostMs || 0;
             if (entry.jsonDelayMs) await new Promise(resolve => setTimeout(resolve, entry.jsonDelayMs));
@@ -384,11 +388,20 @@ function createFakeQeeqBrowser(options = {}) {
           }
         };
         for (const handler of this.listeners.get('response') || []) handler(response);
+        for (const handler of this.listeners.get('requestfinished') || []) handler(request);
       };
-      for (const entry of state.responseSequence) {
-        if (entry.emitDelayMs) setTimeout(() => emit(entry), entry.emitDelayMs);
-        else emit(entry);
+      for (const entry of sequence) {
+        const request = { url: () => entry.url, method: () => entry.method || 'GET' };
+        for (const handler of this.listeners.get('request') || []) handler(request);
+        if (entry.emitDelayMs) setTimeout(() => emit(entry, request), entry.emitDelayMs);
+        else emit(entry, request);
       }
+    }
+
+    async submit() {
+      state.submitted = true;
+      state.responseListenerAttachedBeforeSubmit = (this.listeners.get('response') || []).length > 0;
+      await this.emitResponses(state.responseSequence);
       const resultUrl = new URL('https://www.qeeq.pl/car/search');
       resultUrl.searchParams.set('id', 'fake-session');
       this.currentUrl = resultUrl.toString();

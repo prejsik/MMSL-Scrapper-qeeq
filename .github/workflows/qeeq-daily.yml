@@ -62,8 +62,8 @@ jobs:
       estimated_offer_volume: ${{ steps.plan.outputs.estimated_offer_volume }}
       estimated_artifact_bytes: ${{ steps.plan.outputs.estimated_artifact_bytes }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
           cache: npm
@@ -126,7 +126,7 @@ jobs:
             --github-output="$GITHUB_OUTPUT"
       - name: Upload plan diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: qeeq-plan-${{ github.run_id }}
           if-no-files-found: warn
@@ -140,8 +140,8 @@ jobs:
     needs: plan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
       - name: Notify plan failure
@@ -169,8 +169,8 @@ jobs:
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     timeout-minutes: ${{ fromJSON(needs.plan.outputs.chunk_timeout_minutes) }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
           cache: npm
@@ -202,7 +202,7 @@ jobs:
           printf '{"chunk_id":"%s","exit_code":%s}\n' "$CHUNK_ID" "$code" > output/exit-envelope.txt
       - name: Upload chunk diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: qeeq-results-${{ matrix.chunk_id }}
           if-no-files-found: warn
@@ -225,20 +225,20 @@ jobs:
       report_ready: ${{ steps.merge.outputs.report_ready }}
       merged_exit_code: ${{ steps.merge.outputs.exit_code }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
           cache: npm
       - run: npm ci
       - name: Download every available chunk
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: qeeq-results-*
           path: downloaded-parts
       - name: Download authoritative expected keys
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: qeeq-plan-${{ github.run_id }}
           path: plan-input
@@ -270,7 +270,7 @@ jobs:
           fi
       - name: Upload merged reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: qeeq-merged-${{ github.run_id }}
           if-no-files-found: warn
@@ -297,8 +297,8 @@ jobs:
     outputs:
       page_url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/configure-pages@v5
-      - uses: actions/download-artifact@v4
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: qeeq-merged-${{ github.run_id }}
           path: merged
@@ -310,27 +310,27 @@ jobs:
           cp merged/qeeq-results-latest.json pages-site/qeeq-results-latest.json
           cp merged/qeeq-results.csv pages-site/qeeq-results.csv
           cp merged/qeeq-summary.xlsx pages-site/qeeq-summary.xlsx
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:
           path: pages-site
       - name: Deploy Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
 
   notify:
     if: ${{ always() && needs.plan.outputs.should_run == 'true' }}
     needs: [plan, scrape, merge, pages]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
           cache: npm
       - run: npm ci
       - name: Download merged result when available
         continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: qeeq-merged-${{ github.run_id }}
           path: merged
