@@ -1,5 +1,5 @@
 const fs = require('node:fs');
-const { buildMmAvailabilityAlert } = require('./mmAvailability');
+const { classifyMmAvailability } = require('./mmAvailability');
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
 const BIDI_CONTROLS = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
@@ -126,15 +126,55 @@ function recommendationLine(options) {
   return `Rekomendacje — decyzje: ${nonNegativeInteger(read(counts, 'decision_count'))}, site: ${nonNegativeInteger(read(counts, 'site_recommendation_count'))}, import: ${nonNegativeInteger(read(counts, 'import_recommendation_count'))} (zwiększ: ${nonNegativeInteger(read(counts, 'increase_count'))}, zmniejsz: ${nonNegativeInteger(read(counts, 'decrease_count'))}, hold: ${nonNegativeInteger(read(counts, 'hold_count'))}, review: ${nonNegativeInteger(read(counts, 'review_count'))})`;
 }
 
-function boundedFinalMessage(lines, options) {
-  const bodyCharacters = [...lines.join('\n')];
+function mmDateGroups(payload) {
+  const availability = classifyMmAvailability(payload);
+  const groups = [];
+  if (availability.confirmed_missing_dates.length) {
+    groups.push({ header: 'Brak MM - pelne dane', dates: availability.confirmed_missing_dates });
+  }
+  if (availability.incomplete_dates.length) {
+    groups.push({ header: 'Nie mozna potwierdzic - niepelne dane', dates: availability.incomplete_dates });
+  }
+  return groups;
+}
+
+function renderBoundedMmSections(groups, maximumCharacters) {
+  const shown = groups.map(() => 0);
+  const render = () => groups.map((group, index) => {
+    const lines = [group.header, ...group.dates.slice(0, shown[index]).map(date => `- ${date}`)];
+    const omitted = group.dates.length - shown[index];
+    if (omitted > 0) lines.push(`- ... pominięto: ${omitted}`);
+    return lines.join('\n');
+  }).join('\n');
+  let result = render();
+  if ([...result].length > maximumCharacters) throw new Error('Telegram MM section headers exceed the message limit');
+  let added;
+  do {
+    added = false;
+    for (let index = 0; index < groups.length; index += 1) {
+      if (shown[index] >= groups[index].dates.length) continue;
+      shown[index] += 1;
+      const candidate = render();
+      if ([...candidate].length <= maximumCharacters) {
+        result = candidate;
+        added = true;
+      } else {
+        shown[index] -= 1;
+      }
+    }
+  } while (added);
+  return result;
+}
+
+function boundedFinalMessage(lines, payload, options) {
+  const body = lines.join('\n');
   const links = linkLines(options);
   const suffix = links.length ? `\n${links.join('\n')}` : '';
-  const suffixCharacters = [...suffix];
-  if (bodyCharacters.length + suffixCharacters.length <= 4096) return `${bodyCharacters.join('')}${suffix}`;
-  const marker = [...'\n…'];
-  const bodyLimit = Math.max(0, 4096 - suffixCharacters.length - marker.length);
-  return `${bodyCharacters.slice(0, bodyLimit).join('')}${marker.join('')}${suffix}`;
+  const groups = mmDateGroups(payload);
+  if (!groups.length) return `${body}${suffix}`;
+  const mmBudget = 4096 - [...body].length - [...suffix].length - 1;
+  const mmSections = renderBoundedMmSections(groups, mmBudget);
+  return `${body}\n${mmSections}${suffix}`;
 }
 
 function buildFinalSummary(payload, options) {
@@ -157,9 +197,7 @@ function buildFinalSummary(payload, options) {
   if (qualityCodes.length) lines.push(`Jakość — kody: ${qualityCodes.join(', ')}`);
   const recommendations = recommendationLine(options);
   if (recommendations) lines.push(recommendations);
-  const mmAlert = buildMmAvailabilityAlert(root);
-  if (mmAlert) lines.push(mmAlert);
-  return boundedFinalMessage(lines, options);
+  return boundedFinalMessage(lines, root, options);
 }
 
 function buildPlanFailureSummary(error, options) {

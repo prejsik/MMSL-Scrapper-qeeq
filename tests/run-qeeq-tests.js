@@ -2354,6 +2354,35 @@ test('Telegram final summary stays within 4096 characters and preserves prioriti
   assert.match(text, /Run GitHub Actions: https:\/\/github\.com\/example\/actions\/runs\/1/);
 });
 
+test('Telegram bounds mixed MM evidence structurally without dropping either status', () => {
+  const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
+  const publicOffer = {
+    record_type: 'offer', provider_name: 'Ace', total_price: 200, daily_price: 100,
+    currency: 'PLN', price_tier: 'public', price_verified: true
+  };
+  const startDates = Array.from({ length: 500 }, (_, index) => {
+    const date = new Date(Date.UTC(2026, 0, 1 + index));
+    return date.toISOString().slice(0, 10);
+  });
+  const scenarios = startDates.slice(0, 450).map(date => ({
+    key: `ktw|${date}|2`, airport_key: 'ktw', rental_days: 2, status: 'success',
+    pickup_at: `${date}T10:00:00`, offers: [publicOffer]
+  }));
+  const text = buildFinalSummary({
+    options: { start_dates: startDates, airport_keys: ['ktw'], durations_days: [2] },
+    scenarios
+  }, {
+    reportUrl: 'https://example.test/report.html',
+    runUrl: 'https://github.com/example/actions/runs/1'
+  });
+  assert.ok([...text].length <= 4096);
+  assert.match(text, /Brak MM - pelne dane\n/);
+  assert.match(text, /Brak MM - pelne dane[\s\S]*- \.\.\. pominięto: \d+/);
+  assert.match(text, /Nie mozna potwierdzic - niepelne dane\n- 2027-03-27/);
+  assert.match(text, /Raport: https:\/\/example\.test\/report\.html/);
+  assert.match(text, /Run GitHub Actions: https:\/\/github\.com\/example\/actions\/runs\/1/);
+});
+
 test('Telegram summaries reject unsafe links and sanitize hostile malformed inputs deterministically', () => {
   const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
   const hostile = { toString: null };
