@@ -9,7 +9,7 @@ const CSV_HEADERS = [
   'transmission','seats','doors','luggage','provider_name','provider_rating','provider_rating_count',
   'deposit_amount','deposit_currency','public_discounted_total','total_price','daily_price',
   'conditional_offer_total','conditional_offer_daily','conditional_offer_type',
-  'conditional_member_total','conditional_member_daily','reference_price','currency','price_label',
+  'conditional_member_total','conditional_member_daily','reference_price','reference_currency','currency','price_label',
   'price_tier','price_scope','price_verified','conditional_price_verified',
   'parsing_source','source_search_url','captured_at'
 ];

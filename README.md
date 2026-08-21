@@ -29,7 +29,7 @@ node src/qeeq/validateLocations.js --config=qeeq.config.example.json --output=ou
 node -e "const p=require('./output/qeeq-location-validation.json'); if(p.validation_status!=='pass'||p.expected_airports!==9||p.validated_airports!==9||new Set(p.airports.map(x=>x.iata)).size!==9) process.exit(1); console.log({validation_status:p.validation_status,validated_airports:p.validated_airports});"
 ```
 
-A current ID drift for an otherwise exact IATA, label, and data type may be reported as `location_id_drift`; missing or ambiguous identity is a blocker. Review any warning before scraping.
+A current ID drift for an otherwise exact IATA, label, data type, and type when QEEQ exposes it is reported as `location_id_drift`; missing or mismatched identity is a blocker. The same comparison runs again inside every scrape scenario, and canonical output uses the selected live city and landmark IDs.
 
 Run one fresh KTW two-day scenario and build the two presentation reports:
 
@@ -98,12 +98,12 @@ All paths in the JSON profile are repository-relative except `browserExecutableP
 | `maxVehicleGroupsPerScenario` | Per-scenario vehicle-group cap. |
 | `maxOffersPerScenario` | Per-scenario expanded provider-offer cap. |
 | `maxScenarios` | Hard workload cap; must be from 1 through `7020`. |
-| `fullScheduleEnabled` | Local runner safety flag. It remains `false` in the manual example. |
+| `fullScheduleEnabled` | Explicit local acknowledgement required for more than nine scenarios. It remains `false` in the manual example. |
 | `browserExecutablePath` | Empty for bundled Playwright Chromium, or an absolute browser executable path. |
 | `outputCsv` | Safe relative CSV destination used by `cli.js`. |
 | `artifactsDir` | Safe relative directory for sanitized diagnostics. |
 
-Common overrides include `--locations`, `--rolling-days`, `--start-dates`, `--durations-days`, `--location-concurrency`, `--max-scenarios`, and `--save`. Unknown options, unsafe relative paths, a non-catalog location, and a matrix above the cap fail before scraping.
+Common overrides include `--locations`, `--rolling-days`, `--start-dates`, `--durations-days`, `--location-concurrency`, `--max-scenarios`, and `--save`. Unknown options, unsafe relative paths, a non-catalog location, a matrix above the cap, and a matrix above nine scenarios without `--full-schedule-enabled=true` fail before scraping.
 
 ## Location coverage
 
@@ -134,7 +134,7 @@ Public ranking requires all of the following:
 - a supported currency (the Polish workflow expects `PLN`);
 - an expanded offer with a resolved provider name.
 
-Conditional prices are retained only in separate conditional fields. `newcomer_coupon`, Diamond/member, login-only, and other conditional totals never become `total_price` and never enter Top 3. A crossed-out reference amount, deposit, rating, or discount percentage is not a payable price. Daily price is derived only from an explicitly scoped verified total, or vice versa when the daily scope is explicit.
+Conditional prices are retained only in separate conditional fields and are verified only with a positive finite total and explicit `PLN` currency. `newcomer_coupon`, Diamond/member, login-only, and other conditional totals never become `total_price` and never enter Top 3. A crossed-out reference amount, deposit, rating, or discount percentage is not a payable price. Deposit and reference price retain their own currencies (`deposit_currency` and `reference_currency`); a foreign auxiliary currency remains visible but raises `unexpected_currency`. Daily price is derived only from an explicitly scoped verified total, or vice versa when the daily scope is explicit.
 
 ## Outputs and statuses
 
@@ -189,7 +189,7 @@ Manual `workflow_dispatch` defaults remain one KTW/two-day scenario with paralle
 
 ## Artifacts, Pages, and Telegram
 
-The daily workflow retains planning and chunk diagnostics for 7 days and merged reports for 30 days. If `QEEQ_PAGES_ENABLED=true` and all merged outputs exist, Pages publishes the self-contained report and JSON/CSV/XLSX downloads. If Pages is disabled or unavailable, the Telegram summary uses the merged GitHub Actions artifact/run link instead.
+The daily workflow retains planning and chunk diagnostics for 7 days and merged reports for 30 days. If `QEEQ_PAGES_ENABLED=true` and all merged outputs exist, Pages publishes the self-contained report and JSON/CSV/XLSX downloads. Only the Pages job receives `pages: write` and `id-token: write`; all other jobs retain read-only repository permissions. If Pages is disabled or unavailable, the Telegram summary uses the merged GitHub Actions artifact/run link instead.
 
 Telegram delivery is performed only by the workflow, never by `telegramSummary.js`; that module only builds sanitized text. Its GitHub Actions secrets are:
 

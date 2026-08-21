@@ -25,7 +25,7 @@ function compareLiveAirport(catalogAirport, liveAirport) {
   if (!liveAirport) {
     return { useLiveIds: false, error: { code: 'location_match_missing', expected: catalogAirport.iata } };
   }
-  if (String(liveAirport.iata).toUpperCase() !== catalogAirport.iata) {
+  if (String(liveAirport.iata || '').trim().toUpperCase() !== catalogAirport.iata) {
     return { useLiveIds: false, error: { code: 'location_iata_mismatch', expected: catalogAirport.iata, actual: liveAirport.iata } };
   }
   if (normalizeLocationKey(liveAirport.label) !== normalizeLocationKey(catalogAirport.label)) {
@@ -37,12 +37,17 @@ function compareLiveAirport(catalogAirport, liveAirport) {
   if (normalizeLocationKey(liveAirport.dataType) !== normalizeLocationKey(catalogAirport.dataType)) {
     return { useLiveIds: false, error: { code: 'location_data_type_mismatch', expected: catalogAirport.dataType, actual: liveAirport.dataType } };
   }
-  const drifted = String(liveAirport.city) !== catalogAirport.cityId || String(liveAirport.landmark) !== catalogAirport.landmarkId;
+  const cityId = liveAirport.city === null || liveAirport.city === undefined ? '' : String(liveAirport.city).trim();
+  const landmarkId = liveAirport.landmark === null || liveAirport.landmark === undefined ? '' : String(liveAirport.landmark).trim();
+  if (!cityId || !landmarkId) {
+    return { useLiveIds: false, error: { code: 'location_id_missing', expected: catalogAirport.iata } };
+  }
+  const drifted = cityId !== catalogAirport.cityId || landmarkId !== catalogAirport.landmarkId;
   return {
     useLiveIds: true,
-    cityId: String(liveAirport.city),
-    landmarkId: String(liveAirport.landmark),
-    qualityWarning: drifted ? { code: 'location_id_drift', expectedCityId: catalogAirport.cityId, actualCityId: String(liveAirport.city), expectedLandmarkId: catalogAirport.landmarkId, actualLandmarkId: String(liveAirport.landmark) } : null
+    cityId,
+    landmarkId,
+    qualityWarning: drifted ? { code: 'location_id_drift', expectedCityId: catalogAirport.cityId, actualCityId: cityId, expectedLandmarkId: catalogAirport.landmarkId, actualLandmarkId: landmarkId } : null
   };
 }
 

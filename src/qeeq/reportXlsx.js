@@ -18,7 +18,7 @@ const DETAIL_COLUMNS = [
   'Provider', 'Vehicle', 'Category', 'Transmission', 'Seats', 'Doors', 'Luggage',
   'Provider rating', 'Rating count', 'Deposit amount', 'Deposit currency', 'Public discounted total',
   'Public total', 'Public daily', 'Conditional type', 'Conditional offer total', 'Conditional offer daily',
-  'Diamond/member total', 'Diamond/member daily', 'Reference price', 'Currency', 'Price tier', 'Price scope',
+  'Diamond/member total', 'Diamond/member daily', 'Reference price', 'Reference currency', 'Currency', 'Price tier', 'Price scope',
   'Public price verified', 'Conditional price verified', 'Parsing source', 'Captured at', 'Source'
 ];
 
@@ -107,6 +107,7 @@ function buildDetailRows(payload = {}) {
     'Diamond/member total': finite(offer.conditional_member_total),
     'Diamond/member daily': finite(offer.conditional_member_daily),
     'Reference price': finite(offer.reference_price),
+    'Reference currency': safeText(offer.reference_currency),
     Currency: safeText(offer.currency),
     'Price tier': safeText(offer.price_tier),
     'Price scope': safeText(offer.price_scope),
@@ -304,10 +305,10 @@ async function buildWorkbook(payload = {}) {
   addObjectRows(workbook.addWorksheet('Details'), DETAIL_COLUMNS, buildDetailRows(root), {
     'Pickup at': DATE_FORMAT, 'Drop-off at': DATE_FORMAT, 'Captured at': DATE_FORMAT, 'Rental days': INTEGER_FORMAT,
     Seats: INTEGER_FORMAT, Doors: INTEGER_FORMAT, Luggage: INTEGER_FORMAT, 'Provider rating': NUMBER_FORMAT,
-    'Rating count': INTEGER_FORMAT, 'Deposit amount': PLN_FORMAT, 'Public discounted total': PLN_FORMAT,
+    'Rating count': INTEGER_FORMAT, 'Deposit amount': NUMBER_FORMAT, 'Public discounted total': PLN_FORMAT,
     'Public total': PLN_FORMAT, 'Public daily': PLN_FORMAT, 'Conditional offer total': PLN_FORMAT,
     'Conditional offer daily': PLN_FORMAT, 'Diamond/member total': PLN_FORMAT, 'Diamond/member daily': PLN_FORMAT,
-    'Reference price': PLN_FORMAT
+    'Reference price': NUMBER_FORMAT
   });
   const quality = workbook.addWorksheet('Data quality');
   const qualityRows = diagnosticRows(root);

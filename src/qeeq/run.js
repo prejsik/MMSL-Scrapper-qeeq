@@ -2,14 +2,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { catalogEntryForLocation } = require('./locations');
 const { loadConfig, parseCliArgs, printHelp } = require('./config');
-const { isVerifiedPublicOffer, scenarioArtifactRef } = require('./utils');
+const { isVerifiedConditionalOffer, isVerifiedPublicOffer, scenarioArtifactRef } = require('./utils');
 
 const OFFER_FIELDS = [
   'vehicle_name', 'vehicle_category', 'transmission', 'seats', 'doors', 'luggage',
   'provider_name', 'provider_rating', 'provider_rating_count', 'deposit_amount', 'deposit_currency',
   'public_discounted_total', 'total_price', 'daily_price', 'conditional_offer_total',
   'conditional_offer_daily', 'conditional_offer_type', 'conditional_member_total',
-  'conditional_member_daily', 'reference_price', 'currency', 'price_label', 'price_tier',
+  'conditional_member_daily', 'reference_price', 'reference_currency', 'currency', 'price_label', 'price_tier',
   'price_scope', 'price_verified', 'conditional_price_verified', 'parsing_source',
   'source_search_url', 'captured_at'
 ];
@@ -25,13 +25,14 @@ function arrayOf(value) {
 
 function qualityErrorsForOffer(offer) {
   if (typeof offer?.provider_name !== 'string' || !offer.provider_name.trim()) return ['provider_unresolved'];
-  if (offer.currency && offer.currency !== 'PLN') return ['unexpected_currency'];
+  if ([offer.currency, offer.deposit_currency, offer.reference_currency].some(currency => currency && currency !== 'PLN')) {
+    return ['unexpected_currency'];
+  }
+  if (offer.conditional_price_verified === true && !isVerifiedConditionalOffer(offer)) return ['price_unverified'];
   if (isVerifiedPublicOffer(offer)) return [];
   const verifiedConditional = offer.price_verified !== true
     && ['conditional', 'diamond', 'member'].includes(offer.price_tier)
-    && offer.conditional_price_verified === true
-    && [offer.conditional_offer_total, offer.conditional_member_total]
-      .some(value => Number.isFinite(value) && value > 0);
+    && isVerifiedConditionalOffer(offer);
   return verifiedConditional ? [] : ['price_unverified'];
 }
 
@@ -87,8 +88,8 @@ function buildScenarioPayload(input = {}) {
     requested_city: airport.city ?? null,
     airport_key: airport.key ?? null,
     iata: airport.iata ?? null,
-    qeeq_city_id: airport.cityId ?? null,
-    qeeq_landmark_id: airport.landmarkId ?? null,
+    qeeq_city_id: outcome.qeeq_city_id ?? airport.cityId ?? null,
+    qeeq_landmark_id: outcome.qeeq_landmark_id ?? airport.landmarkId ?? null,
     pickup_at: dateTime(scenario.pickupDate, scenario.pickupTime),
     dropoff_at: dateTime(scenario.dropoffDate, scenario.dropoffTime),
     rental_days: scenario.rentalDays ?? null,
@@ -299,6 +300,9 @@ function expandScenarios(config, now = new Date()) {
   });
   const count = airports.length * dates.length * config.durationsDays.length;
   assertScenarioLimit(count, config.maxScenarios);
+  if (count > 9 && config.fullScheduleEnabled !== true) {
+    throw new Error(`Expanded scenario count ${count} requires fullScheduleEnabled=true`);
+  }
 
   return airports.flatMap(airport => dates.flatMap(pickupDate => config.durationsDays.map(rentalDays => {
     const scenario = {

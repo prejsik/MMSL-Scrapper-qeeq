@@ -93,7 +93,7 @@ function offerRow(offer, scenario) {
     <td>${priceCell(offer.conditional_offer_total, offer.currency)} <span class="price-state">${conditionalVerified}</span></td>
     <td>${priceCell(offer.conditional_offer_daily, offer.currency)}</td>
     <td>${priceCell(offer.conditional_member_total, offer.currency)}</td><td>${priceCell(offer.conditional_member_daily, offer.currency)}</td>
-    <td>${priceCell(offer.reference_price, offer.currency)}</td>
+    <td>${priceCell(offer.reference_price, offer.reference_currency)}</td>
     <td>${escapeHtml(display(offer.price_tier))}</td><td>${escapeHtml(display(offer.price_scope))}</td>
     <td>${escapeHtml(display(offer.price_label))}</td><td>${escapeHtml(display(offer.parsing_source))}</td>
     <td>${escapeHtml(display(offer.captured_at))}</td><td>${safeSourceLink(offer.source_search_url)}</td>

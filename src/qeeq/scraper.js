@@ -1,6 +1,6 @@
-const { normalizePriceCandidate, parseMoney, rankVerifiedPublicOffers, sanitizeSourceUrl } = require('./utils');
+const { normalizePriceCandidate, parseMoneyDetails, rankVerifiedPublicOffers, sanitizeSourceUrl } = require('./utils');
 const { createFailureArtifactSession } = require('./diagnostics');
-const { normalizeLocationKey } = require('./locations');
+const { compareLiveAirport, normalizeLocationKey } = require('./locations');
 
 const SELECTORS = Object.freeze({
   pickupInput: 'input[name="pickup"], .J-pick-up-input',
@@ -151,8 +151,9 @@ function matchingAirportSuggestions(suggestions, airport) {
   const expectedIata = normalizeText(airport.iata).toUpperCase();
   const expectedLabel = normalizeLocationKey(airport.label);
   return suggestions.filter(item => {
-    if (item.iata !== expectedIata) return false;
-    return !expectedLabel || normalizeLocationKey(item.label) === expectedLabel;
+    const iataMatches = item.iata === expectedIata;
+    const labelMatches = Boolean(expectedLabel) && normalizeLocationKey(item.label) === expectedLabel;
+    return iataMatches || labelMatches;
   });
 }
 
@@ -244,7 +245,9 @@ async function selectVisibleAirport(page, airport, options) {
   const matches = await resolveSelectedAirportMatches(page, airport, options);
   if (matches.length === 0) throw controlledError('location_match_missing');
   if (matches.length !== 1) throw controlledError('location_match_ambiguous');
-  return matches[0];
+  const comparison = compareLiveAirport(airport, matches[0]);
+  if (comparison.error) throw controlledError(comparison.error.code);
+  return comparison;
 }
 
 function snapshotOfferSubtree(input = {}) {
@@ -414,18 +417,19 @@ function parseRating(text) {
 
 function parseDeposit(text) {
   if (typeof text !== 'string' || !text.trim()) return null;
-  return parseMoney(text.replace(/^\s*(?:depozyt|deposit)\s*:\s*/i, ''), 'PLN');
+  return parseMoneyDetails(text.replace(/^\s*(?:depozyt|deposit)\s*:\s*/i, ''), 'PLN');
 }
 
 function parseOfferSnapshot(snapshot, context = {}, providerMetadata = new Map()) {
   const safeSnapshot = snapshot && typeof snapshot === 'object' ? snapshot : {};
   const safeContext = context && typeof context === 'object' ? context : {};
+  const deposit = parseDeposit(safeSnapshot.depositText);
   const provider = resolveProviderForOffer(safeSnapshot, providerMetadata);
   if (provider.quality_error) {
     return {
       ...parseGroupSnapshot(safeContext.vehicle, safeContext),
       provider_rating: parseRating(safeSnapshot.ratingText),
-      deposit_amount: parseDeposit(safeSnapshot.depositText),
+      deposit_amount: deposit?.amount ?? null,
       quality_errors: [provider.quality_error]
     };
   }
@@ -447,6 +451,9 @@ function parseOfferSnapshot(snapshot, context = {}, providerMetadata = new Map()
     rentalDays: safeContext.rentalDays,
     fallbackCurrency: 'PLN'
   });
+  const reference = safeSnapshot.referencePriceText
+    ? parseMoneyDetails(safeSnapshot.referencePriceText, 'PLN')
+    : null;
   const rawRatingCount = safeSnapshot.ratingCountText;
   const ratingCount = (typeof rawRatingCount === 'string' || typeof rawRatingCount === 'number')
     && String(rawRatingCount).trim()
@@ -464,14 +471,20 @@ function parseOfferSnapshot(snapshot, context = {}, providerMetadata = new Map()
     provider_name: provider.providerName,
     provider_rating: parseRating(safeSnapshot.ratingText),
     provider_rating_count: ratingCount,
-    deposit_amount: parseDeposit(safeSnapshot.depositText),
-    deposit_currency: 'PLN',
+    deposit_amount: deposit?.amount ?? null,
+    deposit_currency: deposit?.currency ?? null,
     ...price,
-    reference_price: safeSnapshot.referencePriceText ? parseMoney(safeSnapshot.referencePriceText, 'PLN') : null,
+    reference_price: reference?.amount ?? null,
+    reference_currency: reference?.currency ?? null,
     rental_days: safeContext.rentalDays ?? null,
     parsing_source: 'hybrid'
   };
   const qualityErrors = [...(price.quality_errors || [])];
+  const auxiliaryCurrencies = [deposit, reference].filter(Boolean).flatMap(details => details.explicitCurrencies.length
+    ? details.explicitCurrencies
+    : [details.currency]);
+  if (auxiliaryCurrencies.some(currency => currency !== 'PLN')) qualityErrors.push('unexpected_currency');
+  if ([deposit, reference].filter(Boolean).some(details => details.explicitCurrencies.length > 1)) qualityErrors.push('unexpected_currency');
   if (discountMismatch) qualityErrors.push('discount_type_mismatch');
   if (qualityErrors.length) result.quality_errors = [...new Set(qualityErrors)];
   return result;
@@ -901,6 +914,14 @@ async function closeBrowserResources(context, browser, primaryError = null) {
   if (cleanupError) throw cleanupError;
 }
 
+function attachSelectedAirportMetadata(error, selectedAirport) {
+  if (!selectedAirport || !error || typeof error !== 'object') return error;
+  error.qeeqCityId = selectedAirport.cityId;
+  error.qeeqLandmarkId = selectedAirport.landmarkId;
+  error.qeeqQualityErrors = selectedAirport.qualityWarning ? [selectedAirport.qualityWarning.code] : [];
+  return error;
+}
+
 class QeeqScraper {
   constructor(config, deps = {}) {
     const unsupported = Object.keys(deps).filter(name => !['launchBrowser', 'now', 'sleep'].includes(name));
@@ -917,6 +938,7 @@ class QeeqScraper {
     let page;
     let observation;
     let result;
+    let selectedAirport;
     let operationError = null;
     const diagnostics = createFailureArtifactSession(this.config, scenario, attempt, this.now);
     try {
@@ -930,7 +952,7 @@ class QeeqScraper {
         timeout: this.config.navigationTimeoutMs ?? 60000
       });
       await dismissPolishPopups(page);
-      await selectVisibleAirport(page, scenario.airport || {}, {
+      selectedAirport = await selectVisibleAirport(page, scenario.airport || {}, {
         timeoutMs: this.config.resultsTimeoutMs ?? 30000,
         sleep: this.sleep,
         nowMillis: () => new Date(this.now()).getTime()
@@ -950,7 +972,8 @@ class QeeqScraper {
       await page.waitForSelector(SELECTORS.group, { timeout: this.config.resultsTimeoutMs ?? 60000 });
       const sourceSearchUrl = sanitizeSourceUrl(page.url());
       await observation.settle();
-      const qualityErrors = await expandAllResults(page, this.config, this.sleep);
+      const qualityErrors = selectedAirport.qualityWarning ? [selectedAirport.qualityWarning.code] : [];
+      qualityErrors.push(...await expandAllResults(page, this.config, this.sleep));
       const observed = await observation.finish();
       const providerMetadata = mergeObservedProviderMetadata(observed.payloads);
       qualityErrors.unshift(...observed.qualityErrors);
@@ -961,6 +984,8 @@ class QeeqScraper {
         key: scenario.key,
         status: 'success',
         attempt,
+        qeeq_city_id: selectedAirport.cityId,
+        qeeq_landmark_id: selectedAirport.landmarkId,
         groups: extracted.groups,
         offers: extracted.offers,
         errors: [],
@@ -969,6 +994,7 @@ class QeeqScraper {
         captured_at: capturedAt
       };
     } catch (error) {
+      attachSelectedAirportMetadata(error, selectedAirport);
       try {
         const artifacts = await diagnostics.capture(error);
         if (artifacts.length) Object.defineProperty(error, 'qeeqArtifacts', { value: artifacts });
@@ -985,7 +1011,11 @@ class QeeqScraper {
     } catch (error) {
       operationError ||= error;
     }
-    await closeBrowserResources(context, browser, operationError);
+    try {
+      await closeBrowserResources(context, browser, operationError);
+    } catch (error) {
+      throw attachSelectedAirportMetadata(error, selectedAirport);
+    }
     return result;
   }
 
@@ -1001,10 +1031,12 @@ class QeeqScraper {
           status: 'failure',
           attempt,
           error_code: errorCode,
+          qeeq_city_id: error?.qeeqCityId,
+          qeeq_landmark_id: error?.qeeqLandmarkId,
           groups: [],
           offers: [],
           errors: [{ code: errorCode }],
-          quality_errors: [],
+          quality_errors: Array.isArray(error?.qeeqQualityErrors) ? [...new Set(error.qeeqQualityErrors)] : [],
           artifacts: Array.isArray(error?.qeeqArtifacts) ? error.qeeqArtifacts : []
         };
       }

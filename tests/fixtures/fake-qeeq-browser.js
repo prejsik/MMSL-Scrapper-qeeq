@@ -300,7 +300,11 @@ function createFakeQeeqBrowser(options = {}) {
       const current = fixtureMatch || airportFixture.find(item => item.iata === 'KTW');
       const override = options.autocompleteOverrides?.[current.iata];
       if (override === 'missing') return [stale];
-      const visible = { ...current, visible: true };
+      const visible = {
+        ...current,
+        ...(override && typeof override === 'object' ? override : {}),
+        visible: true
+      };
       if (override === 'ambiguous') return [stale, visible, { ...visible }];
       return [stale, visible];
     }

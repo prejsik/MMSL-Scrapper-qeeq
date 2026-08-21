@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { writeCsvReport } = require('./report');
 const { buildRootPayload, canonicalArtifactRefs } = require('./run');
-const { isVerifiedPublicOffer } = require('./utils');
+const { isVerifiedConditionalOffer, isVerifiedPublicOffer } = require('./utils');
 
 const FORBIDDEN_NORMALIZED_FIELDS = new Set([
   'auth', 'authorization', 'businessbid', 'businessid', 'clid', 'cookie', 'cookies', 'fpt',
@@ -16,7 +16,7 @@ const SCENARIO_STRING_FIELDS = [
 const OFFER_STRING_FIELDS = [
   'vehicle_name', 'vehicle_category', 'transmission', 'provider_name', 'deposit_currency',
   'conditional_offer_type', 'currency', 'price_label', 'price_tier', 'price_scope',
-  'parsing_source', 'source_search_url', 'captured_at'
+  'parsing_source', 'reference_currency', 'source_search_url', 'captured_at'
 ];
 const OFFER_NUMBER_FIELDS = [
   'seats', 'doors', 'luggage', 'provider_rating', 'provider_rating_count', 'deposit_amount',
@@ -182,6 +182,9 @@ function normalizeOffer(offer) {
   if (normalized.price_tier != null && !['public', 'diamond', 'member', 'conditional', 'unknown'].includes(normalized.price_tier)) throw new Error('offer.price_tier is invalid');
   if (normalized.price_verified === true && !isVerifiedPublicOffer(normalized)) {
     throw new Error('offer.price_verified true requires the verified-public contract');
+  }
+  if (normalized.conditional_price_verified === true && !isVerifiedConditionalOffer(normalized)) {
+    throw new Error('offer.conditional_price_verified true requires the verified-conditional contract');
   }
   return normalized;
 }

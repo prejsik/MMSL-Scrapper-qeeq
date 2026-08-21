@@ -77,7 +77,8 @@ test('full scheduled matrix expands to 7020 airport searches', () => {
     durationsDays: [2,3,4,5,6,7,8,9,10,11,12,13,14],
     pickupTime: '10:00',
     dropoffTime: '10:00',
-    maxScenarios: 7020
+    maxScenarios: 7020,
+    fullScheduleEnabled: true
   };
   const scenarios = expandScenarios(config, new Date('2026-08-20T10:00:00+02:00'));
   assert.equal(scenarios.length, 7020);
@@ -138,12 +139,14 @@ test('all nine airports match the sanitized live autocomplete fixture', () => {
   }
 });
 
-test('live airport identity requires IATA normalized label and type', () => {
+test('live airport identity requires IATA normalized label and validates type when QEEQ exposes it', () => {
   const { compareLiveAirport, locationCatalog } = require('../src/qeeq/locations');
   const ktw = locationCatalog.find(city => city.city === 'Katowice').airports[0];
-  assert.equal(compareLiveAirport(ktw, { ...ktw, label: 'Lotnisko Kraków', type: '2' }).error.code, 'location_label_mismatch');
-  assert.equal(compareLiveAirport(ktw, { ...ktw, type: '1' }).error.code, 'location_type_mismatch');
-  assert.equal(compareLiveAirport(ktw, { ...ktw, dataType: 'city' }).error.code, 'location_data_type_mismatch');
+  const liveKtw = { ...ktw, city: ktw.cityId, landmark: ktw.landmarkId };
+  assert.equal(compareLiveAirport(ktw, { ...liveKtw, label: 'Lotnisko Kraków', type: '2' }).error.code, 'location_label_mismatch');
+  assert.equal(compareLiveAirport(ktw, { ...liveKtw, type: null }).error, undefined);
+  assert.equal(compareLiveAirport(ktw, { ...liveKtw, type: '1' }).error.code, 'location_type_mismatch');
+  assert.equal(compareLiveAirport(ktw, { ...liveKtw, dataType: 'city' }).error.code, 'location_data_type_mismatch');
 });
 
 test('newcomer coupon and Diamond totals remain separate from public price', () => {
@@ -600,7 +603,7 @@ test('age and residence use visible-label fallbacks when primary selectors are a
   const { QeeqScraper } = require('../src/qeeq/scraper');
   const fake = createFakeQeeqBrowser({ primaryProfileControls: false });
   const scraper = new QeeqScraper({ baseUrl: 'https://www.qeeq.pl', driverAge: '30-60', residenceCountryCode: 'PL' }, { launchBrowser: fake.launchBrowser, sleep: async () => {} });
-  await scraper.runScenario({ key: 'ktw|2026-09-19|2', airport: { iata: 'KTW' }, pickupDate: '2026-09-19', pickupTime: '10:00', dropoffDate: '2026-09-21', dropoffTime: '10:00', rentalDays: 2 });
+  await scraper.runScenario(task5Scenario());
   assert.deepEqual(fake.semanticLabelsUsed, ['Wiek kierowcy', 'Kraj zamieszkania']);
 });
 
@@ -619,7 +622,7 @@ test('search parameter mismatch prevents form submission', async () => {
   const { QeeqScraper } = require('../src/qeeq/scraper');
   const fake = createFakeQeeqBrowser({ hiddenValueOverrides: { to_date_1: '11:00' } });
   const scraper = new QeeqScraper({ baseUrl: 'https://www.qeeq.pl', driverAge: '30-60', residenceCountryCode: 'PL' }, { launchBrowser: fake.launchBrowser, sleep: async () => {} });
-  const outcome = await scraper.runScenario({ key: 'ktw|2026-09-19|2', airport: { iata: 'KTW' }, pickupDate: '2026-09-19', pickupTime: '10:00', dropoffDate: '2026-09-21', dropoffTime: '10:00', rentalDays: 2 });
+  const outcome = await scraper.runScenario(task5Scenario());
   assert.equal(outcome.error_code, 'search_parameter_mismatch');
   assert.equal(fake.submitted, false);
 });
@@ -629,7 +632,7 @@ test('transient scenario retry creates only one fresh context', async () => {
   const { QeeqScraper } = require('../src/qeeq/scraper');
   const fake = createFakeQeeqBrowser({ failSessions: [1] });
   const scraper = new QeeqScraper({ baseUrl: 'https://www.qeeq.pl', driverAge: '30-60', residenceCountryCode: 'PL' }, { launchBrowser: fake.launchBrowser, sleep: async () => {} });
-  const outcome = await scraper.runScenario({ key: 'ktw|2026-09-19|2', airport: { iata: 'KTW' }, pickupDate: '2026-09-19', pickupTime: '10:00', dropoffDate: '2026-09-21', dropoffTime: '10:00', rentalDays: 2 });
+  const outcome = await scraper.runScenario(task5Scenario());
   assert.equal(outcome.offers[0].provider_name, 'CARWIZ');
   assert.equal(fake.contextsCreated, 2);
 });
@@ -639,7 +642,7 @@ test('unknown network schema falls back to scoped DOM with a quality error', asy
   const { QeeqScraper } = require('../src/qeeq/scraper');
   const fake = createFakeQeeqBrowser({ networkPayload: { changed: true } });
   const scraper = new QeeqScraper({ baseUrl: 'https://www.qeeq.pl', driverAge: '30-60', residenceCountryCode: 'PL', apiObservationTimeoutMs: 10 }, { launchBrowser: fake.launchBrowser, sleep: async () => {} });
-  const outcome = await scraper.runScenario({ key: 'ktw|2026-09-19|2', airport: { iata: 'KTW' }, pickupDate: '2026-09-19', pickupTime: '10:00', dropoffDate: '2026-09-21', dropoffTime: '10:00', rentalDays: 2 });
+  const outcome = await scraper.runScenario(task5Scenario());
   assert.equal(outcome.quality_errors.includes('network_schema_unrecognized'), true);
   assert.equal(outcome.groups.length > 0, true);
 });
@@ -702,9 +705,11 @@ test('location validator rejects missing current QEEQ IDs', async () => {
 });
 
 function task5Scenario() {
+  const { locationCatalog } = require('../src/qeeq/locations');
+  const airport = locationCatalog.find(entry => entry.city === 'Katowice').airports[0];
   return {
     key: 'ktw|2026-09-19|2',
-    airport: { iata: 'KTW', label: 'Port Lotniczy Katowice-Pyrzowice' },
+    airport: { ...airport, city: 'Katowice' },
     pickupDate: '2026-09-19', pickupTime: '10:00',
     dropoffDate: '2026-09-21', dropoffTime: '10:00', rentalDays: 2
   };
@@ -1821,7 +1826,7 @@ test('XLSX contains seven usable sheets with typed verified and conditional pric
     errors: [{ code: 'execution_failed', scenario_key: 'waw:2026-09-20:2' }],
     scenarios: [
       { key: 'ktw:2026-09-19:2', status: 'success', requested_city: 'Katowice', airport_key: 'katowice-pyrzowice', iata: 'KTW', pickup_at: '2026-09-19T10:00:00', dropoff_at: '2026-09-21T10:00:00', rental_days: 2, quality_errors: ['price_unverified'], offers: [
-        { provider_name: 'CHEAPEST', vehicle_name: 'A', transmission: 'Automatic', provider_rating: 8.7, provider_rating_count: 120, deposit_amount: 500, deposit_currency: 'PLN', total_price: 100, daily_price: 50, currency: 'PLN', price_tier: 'public', price_verified: true },
+        { provider_name: 'CHEAPEST', vehicle_name: 'A', transmission: 'Automatic', provider_rating: 8.7, provider_rating_count: 120, deposit_amount: 500, deposit_currency: 'EUR', reference_price: 120, reference_currency: 'EUR', total_price: 100, daily_price: 50, currency: 'PLN', price_tier: 'public', price_verified: true },
         { provider_name: 'TIE FIRST', vehicle_name: 'B', total_price: 119, daily_price: 59.5, currency: 'PLN', price_tier: 'public', price_verified: true },
         { provider_name: 'TIE SECOND', vehicle_name: 'C', total_price: 119, currency: 'PLN', price_tier: 'public', price_verified: true },
         { provider_name: 'FOURTH', vehicle_name: 'D', total_price: 120, currency: 'PLN', price_tier: 'public', price_verified: true },
@@ -1847,12 +1852,15 @@ test('XLSX contains seven usable sheets with typed verified and conditional pric
 
   const details = workbook.getWorksheet('Details');
   const headers = details.getRow(1).values;
-  for (const header of ['Public total', 'Conditional offer total', 'Diamond/member total', 'Provider rating', 'Deposit amount']) assert.equal(headers.includes(header), true);
+  for (const header of ['Public total', 'Conditional offer total', 'Diamond/member total', 'Provider rating', 'Deposit amount', 'Reference currency']) assert.equal(headers.includes(header), true);
   const column = header => headers.indexOf(header);
   assert.equal(typeof details.getRow(2).getCell(column('Public total')).value, 'number');
   assert.equal(typeof details.getRow(2).getCell(column('Provider rating')).value, 'number');
   assert.equal(typeof details.getRow(2).getCell(column('Deposit amount')).value, 'number');
+  assert.equal(details.getRow(2).getCell(column('Reference currency')).value, 'EUR');
   assert.match(details.getRow(2).getCell(column('Public total')).numFmt, /PLN/);
+  assert.doesNotMatch(details.getRow(2).getCell(column('Deposit amount')).numFmt, /PLN/);
+  assert.doesNotMatch(details.getRow(2).getCell(column('Reference price')).numFmt, /PLN/);
   assert.ok(details.getRow(2).getCell(column('Pickup at')).value instanceof Date);
   assert.equal(details.getRow(2).getCell(column('Pickup at')).value.toISOString(), '2026-09-19T10:00:00.000Z');
   assert.equal(details.getRow(6).getCell(column('Conditional offer total')).value, 106);
@@ -3654,4 +3662,260 @@ test('canonical artifact refs are bound to the deterministic scenario hash throu
     payload: { schema_version: 1, provider: 'qeeq.pl', expected_scenarios: 1, expected_checks: 1, scenarios: [tainted], errors: [] }
   }]);
   assert.deepEqual(hostileMerged.scenarios[0].artifact_refs, []);
+});
+
+test('currency evidence is case-insensitive and ignores non-currency VAT text', () => {
+  const { normalizePriceCandidate } = require('../src/qeeq/utils');
+  const base = { rentalPeriodText: 'łącznie za 2 dni', rentalDays: 2, fallbackCurrency: 'PLN' };
+
+  for (const marker of ['CHF', 'chf', 'cHf']) {
+    const result = normalizePriceCandidate({ ...base, displayedText: `Cena 119 ${marker}` });
+    assert.equal(result.currency, 'CHF');
+    assert.equal(result.total_price, null);
+    assert.equal(result.price_verified, false);
+    assert.deepEqual(result.quality_errors, ['unexpected_currency']);
+  }
+  const prefixed = normalizePriceCandidate({ ...base, displayedText: 'CHF 119' });
+  assert.equal(prefixed.currency, 'CHF');
+  assert.equal(prefixed.price_verified, false);
+
+  const withVatLabel = normalizePriceCandidate({ ...base, displayedText: 'Cena 119 zł VAT' });
+  assert.equal(withVatLabel.currency, 'PLN');
+  assert.equal(withVatLabel.total_price, 119);
+  assert.equal(withVatLabel.price_verified, true);
+  assert.deepEqual(withVatLabel.quality_errors, []);
+
+  const withVatRate = normalizePriceCandidate({ ...base, displayedText: 'Cena 119 zł VAT 23%' });
+  assert.equal(withVatRate.currency, 'PLN');
+  assert.equal(withVatRate.total_price, 119);
+  assert.equal(withVatRate.price_verified, true);
+
+  for (const displayedText of ['Cena 119 alloy inclusive', 'Cena 119 all inclusive', 'Cena 119 try later']) {
+    const ordinaryText = normalizePriceCandidate({ ...base, displayedText });
+    assert.equal(ordinaryText.currency, 'PLN', displayedText);
+    assert.equal(ordinaryText.total_price, 119, displayedText);
+    assert.equal(ordinaryText.price_verified, true, displayedText);
+    assert.deepEqual(ordinaryText.quality_errors, [], displayedText);
+  }
+});
+
+test('expanded local matrices require the explicit full schedule switch', () => {
+  const { expandScenarios } = require('../src/qeeq/run');
+  const base = {
+    locations: ['Katowice'], startDates: [], rollingDays: 10, durationsDays: [2],
+    pickupTime: '10:00', dropoffTime: '10:00', timeZone: 'Europe/Warsaw', maxScenarios: 7020
+  };
+  assert.throws(
+    () => expandScenarios({ ...base, fullScheduleEnabled: false }, new Date('2026-08-20T10:00:00+02:00')),
+    /Expanded scenario count 10 requires fullScheduleEnabled=true/
+  );
+  assert.equal(
+    expandScenarios({ ...base, rollingDays: 9, fullScheduleEnabled: false }, new Date('2026-08-20T10:00:00+02:00')).length,
+    9
+  );
+  assert.equal(
+    expandScenarios({ ...base, fullScheduleEnabled: true }, new Date('2026-08-20T10:00:00+02:00')).length,
+    10
+  );
+});
+
+test('scrape uses live airport IDs and records catalog drift in canonical quality', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { locationCatalog } = require('../src/qeeq/locations');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const { buildRootPayload, buildScenarioPayload } = require('../src/qeeq/run');
+  const airport = locationCatalog.find(entry => entry.city === 'Katowice').airports[0];
+  const scenario = { ...task5Scenario(), airport: { ...airport, city: 'Katowice' } };
+  const fake = createFakeQeeqBrowser({ autocompleteOverrides: {
+    KTW: { city: '9997', landmark: '999999' }
+  } });
+
+  const outcome = await new QeeqScraper(task5Config(), {
+    launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep
+  }).runScenario(scenario);
+  assert.equal(outcome.status, 'success');
+  assert.equal(outcome.qeeq_city_id, '9997');
+  assert.equal(outcome.qeeq_landmark_id, '999999');
+  assert.deepEqual(outcome.quality_errors.filter(code => code === 'location_id_drift'), ['location_id_drift']);
+
+  const canonical = buildScenarioPayload({ scenario, outcome: {
+    ...outcome,
+    offers: [{
+      record_type: 'offer', provider_name: 'PUBLIC', currency: 'PLN', price_tier: 'public',
+      price_verified: true, conditional_price_verified: false, total_price: 119, daily_price: 59.5
+    }]
+  }, config: task5Config() });
+  assert.equal(canonical.qeeq_city_id, '9997');
+  assert.equal(canonical.qeeq_landmark_id, '999999');
+  const root = buildRootPayload({ expected_checks: 1, scenarios: [canonical] });
+  assert.equal(root.quality_status, 'warning');
+  assert.equal(root.quality.quality_errors.includes('location_id_drift'), true);
+});
+
+test('post-selection failure retains live airport IDs and drift warning', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { locationCatalog } = require('../src/qeeq/locations');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const airport = locationCatalog.find(entry => entry.city === 'Katowice').airports[0];
+  const scenario = { ...task5Scenario(), airport: { ...airport, city: 'Katowice' } };
+  const fake = createFakeQeeqBrowser({
+    autocompleteOverrides: { KTW: { city: '9997', landmark: '999999' } },
+    hiddenValueOverrides: { to_date_1: '11:00' }
+  });
+
+  const outcome = await new QeeqScraper(task5Config(), {
+    launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep
+  }).runScenario(scenario);
+  assert.equal(outcome.status, 'failure');
+  assert.equal(outcome.error_code, 'search_parameter_mismatch');
+  assert.equal(outcome.qeeq_city_id, '9997');
+  assert.equal(outcome.qeeq_landmark_id, '999999');
+  assert.deepEqual(outcome.quality_errors, ['location_id_drift']);
+});
+
+test('cleanup failure retains selected live airport IDs and drift warning', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { locationCatalog } = require('../src/qeeq/locations');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const airport = locationCatalog.find(entry => entry.city === 'Katowice').airports[0];
+  const scenario = { ...task5Scenario(), airport: { ...airport, city: 'Katowice' } };
+  const fake = createFakeQeeqBrowser({
+    autocompleteOverrides: { KTW: { city: '9997', landmark: '999999' } },
+    contextCloseError: 'context_close_failed'
+  });
+
+  const outcome = await new QeeqScraper(task5Config(), {
+    launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep
+  }).runScenario(scenario);
+  assert.equal(outcome.status, 'failure');
+  assert.equal(outcome.error_code, 'context_close_failed');
+  assert.equal(outcome.qeeq_city_id, '9997');
+  assert.equal(outcome.qeeq_landmark_id, '999999');
+  assert.deepEqual(outcome.quality_errors, ['location_id_drift']);
+});
+
+test('scrape rejects a selected airport with mismatched live identity before submit', async () => {
+  const { createFakeQeeqBrowser } = require('./fixtures/fake-qeeq-browser');
+  const { locationCatalog } = require('../src/qeeq/locations');
+  const { QeeqScraper } = require('../src/qeeq/scraper');
+  const airport = locationCatalog.find(entry => entry.city === 'Katowice').airports[0];
+  const scenario = { ...task5Scenario(), airport: { ...airport, city: 'Katowice' } };
+  const fake = createFakeQeeqBrowser({ autocompleteOverrides: { KTW: { dataType: 'city' } } });
+
+  const outcome = await new QeeqScraper(task5Config(), {
+    launchBrowser: fake.launchBrowser, now: fake.now, sleep: fake.sleep
+  }).runScenario(scenario);
+  assert.equal(outcome.status, 'failure');
+  assert.equal(outcome.error_code, 'location_data_type_mismatch');
+  assert.equal(fake.submitted, false);
+});
+
+test('deposit and reference price retain their own currencies and quality evidence', () => {
+  const domFixture = require('./fixtures/qeeq-expanded-group-ktw.json');
+  const apiFixture = require('./fixtures/qeeq-search-list-ktw.json');
+  const { parseObservedListPayload, parseOfferSnapshot } = require('../src/qeeq/scraper');
+  const providers = parseObservedListPayload(apiFixture);
+  const offer = parseOfferSnapshot({
+    ...domFixture.offer,
+    displayedAmount: '119 zł', diamondAmount: null, discountType: null,
+    depositText: 'Depozyt: 500 EUR', referencePriceText: '150 EUR',
+    rentalPeriodText: 'łącznie za 2 dni'
+  }, { rentalDays: 2, vehicle: domFixture.vehicle }, providers);
+
+  assert.equal(offer.price_verified, true);
+  assert.equal(offer.deposit_amount, 500);
+  assert.equal(offer.deposit_currency, 'EUR');
+  assert.equal(offer.reference_price, 150);
+  assert.equal(offer.reference_currency, 'EUR');
+  assert.deepEqual(offer.quality_errors, ['unexpected_currency']);
+
+  const { buildRootPayload, buildScenarioPayload } = require('../src/qeeq/run');
+  const { mergePayloads } = require('../src/qeeq/mergeResults');
+  const scenario = buildScenarioPayload({
+    scenario: { key: 'aux-currency', airport: { key: 'katowice-pyrzowice', iata: 'KTW' }, rentalDays: 2 },
+    outcome: { status: 'success', offers: [offer], groups: [], quality_errors: [] }
+  });
+  const root = buildRootPayload({ expected_checks: 1, scenarios: [scenario] });
+  assert.equal(root.quality_status, 'warning');
+  assert.deepEqual(root.quality.quality_errors, ['unexpected_currency']);
+  const merged = mergePayloads([{ file: 'aux-currency.json', payload: {
+    schema_version: 1, provider: 'qeeq.pl', expected_scenarios: 1, expected_checks: 1,
+    scenarios: [scenario], errors: []
+  } }]);
+  assert.equal(merged.scenarios[0].offers[0].deposit_currency, 'EUR');
+  assert.equal(merged.scenarios[0].offers[0].reference_currency, 'EUR');
+  assert.deepEqual(merged.quality.quality_errors, ['unexpected_currency']);
+});
+
+test('reports render the reference price with its own currency', () => {
+  const { buildCsv } = require('../src/qeeq/report');
+  const { buildHtmlReport } = require('../src/qeeq/reportHtml');
+  const { buildDetailRows } = require('../src/qeeq/reportXlsx');
+  const payload = { scenarios: [{ key: 'ktw:2026-08-22:2', status: 'success', offers: [{
+    record_type: 'offer', provider_name: 'PUBLIC', total_price: 119, daily_price: 59.5,
+    currency: 'PLN', price_tier: 'public', price_verified: true,
+    reference_price: 150, reference_currency: 'EUR'
+  }] }] };
+
+  const csv = buildCsv(payload);
+  assert.match(csv.split('\n')[0], /reference_price,reference_currency,currency/);
+  assert.match(csv, /150,EUR,PLN/);
+  assert.match(buildHtmlReport(payload), /150 EUR/);
+  assert.equal(buildDetailRows(payload)[0]['Reference currency'], 'EUR');
+});
+
+test('conditional verification requires a positive PLN total in root quality and merge', () => {
+  const { buildRootPayload } = require('../src/qeeq/run');
+  const { mergePayloads } = require('../src/qeeq/mergeResults');
+  const validPublic = {
+    record_type: 'offer', provider_name: 'PUBLIC', currency: 'PLN', price_tier: 'public',
+    price_verified: true, conditional_price_verified: false, total_price: 119
+  };
+  const invalidConditional = {
+    record_type: 'offer', provider_name: 'MEMBER', currency: null, price_tier: 'member',
+    price_verified: false, conditional_price_verified: true, conditional_member_total: 98
+  };
+  const scenario = {
+    key: 'conditional-contract', status: 'success', groups: [], offers: [validPublic, invalidConditional],
+    errors: [], quality_errors: [], artifact_refs: []
+  };
+
+  const root = buildRootPayload({ expected_checks: 1, scenarios: [scenario] });
+  assert.equal(root.quality_status, 'warning');
+  assert.deepEqual(root.quality.quality_errors, ['price_unverified']);
+
+  const chunk = {
+    schema_version: 1, provider: 'qeeq.pl', expected_scenarios: 1, expected_checks: 1,
+    scenarios: [scenario], errors: []
+  };
+  assert.throws(
+    () => mergePayloads([{ file: 'conditional.json', payload: chunk }]),
+    /conditional_price_verified true requires the verified-conditional contract/
+  );
+  for (const conditional_member_total of [0, -1, null]) {
+    assert.throws(
+      () => mergePayloads([{ file: 'conditional.json', payload: {
+        ...chunk,
+        scenarios: [{ ...scenario, offers: [validPublic, {
+          ...invalidConditional, currency: 'PLN', conditional_member_total
+        }] }]
+      } }]),
+      /conditional_price_verified true requires the verified-conditional contract/
+    );
+  }
+});
+
+test('daily workflow grants Pages and OIDC permissions only to the pages job', () => {
+  const fs = require('node:fs');
+  const yaml = fs.readFileSync('.github/workflows/qeeq-daily.yml', 'utf8').replace(/\r\n/g, '\n');
+  const smoke = fs.readFileSync('.github/workflows/qeeq-smoke.yml', 'utf8').replace(/\r\n/g, '\n');
+  const rootPermissions = yaml.match(/^permissions:\n((?:  [^\n]+\n)+)/m)?.[1].trim();
+  const pagesJob = yaml.slice(yaml.indexOf('\n  pages:\n'), yaml.indexOf('\n  notify:\n'));
+  const pagesPermissions = pagesJob.match(/\n    permissions:\n((?:      [^\n]+\n)+)/)?.[1].trim();
+
+  assert.equal(rootPermissions, 'contents: read');
+  assert.equal(pagesPermissions, 'pages: write\n      id-token: write');
+  assert.equal((yaml.match(/pages: write/g) || []).length, 1);
+  assert.equal((yaml.match(/id-token: write/g) || []).length, 1);
+  assert.doesNotMatch(smoke, /pages: write|id-token: write/);
 });

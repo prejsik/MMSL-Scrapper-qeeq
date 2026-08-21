@@ -3,7 +3,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const MONEY_AMOUNT = '(?:\\d{1,3}(?:[ .\\u00a0]\\d{3})+|\\d+)(?:[,.]\\d+)?';
-const MONEY_CURRENCY = '(?:\\b(?:PLN|EUR|USD|GBP)\\b|zł|€|\\$|£)';
+const MONEY_MARKER = '(?:zł|€|\\$|£|(?<![A-Za-z])[A-Za-z]{3}(?![A-Za-z]))';
+const ISO_CURRENCIES = new Set(Intl.supportedValuesOf('currency'));
+const AMBIGUOUS_CURRENCY_WORDS = new Set(['ALL', 'TRY']);
 const INVALID_MONEY_LABELS = ['ocena', 'rating', 'depozyt', 'deposit'];
 const CONDITIONAL_LABEL = /diament|diamond|member|członk|log\s*in|sign\s*in|zaloguj/i;
 const REDACTED_FIELD = /\b(id|bid|clid|_vv_|fpt|ticket|ts|qeeq_fpt)\b\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|[^\s&#,;"']+)/gi;
@@ -32,38 +34,68 @@ function explicitCurrency(raw) {
   return explicitCurrencies(raw)[0] || null;
 }
 
-function explicitCurrencies(raw) {
-  if (typeof raw !== 'string') return [];
-  const currencies = [];
-  for (const match of raw.matchAll(/zł|€|\$|£|\b[A-Za-z]{3}\b/g)) {
-    const marker = match[0];
-    const upper = marker.toUpperCase();
-    if (/^zł$/i.test(marker)) currencies.push('PLN');
-    else if (marker === '€') currencies.push('EUR');
-    else if (marker === '$') currencies.push('USD');
-    else if (marker === '£') currencies.push('GBP');
-    else if (['PLN', 'EUR', 'USD', 'GBP'].includes(upper)) currencies.push(upper);
-    else if (marker === upper) currencies.push(marker);
-  }
-  return currencies;
+function normalizeCurrencyMarker(marker) {
+  if (/^zł$/i.test(marker)) return 'PLN';
+  if (marker === '€') return 'EUR';
+  if (marker === '$') return 'USD';
+  if (marker === '£') return 'GBP';
+  const rawMarker = String(marker || '');
+  const code = rawMarker.toUpperCase();
+  if (AMBIGUOUS_CURRENCY_WORDS.has(code) && rawMarker !== code) return null;
+  return ISO_CURRENCIES.has(code) ? code : null;
 }
 
-function parseMoney(raw, fallbackCurrency, options = {}) {
-  if (typeof raw !== 'string' || !raw.trim() || /\d\s*%/.test(raw)) return null;
+function moneyCurrencyPairs(raw) {
+  if (typeof raw !== 'string') return [];
+  const pairs = [];
+  const patterns = [
+    { expression: new RegExp(`(${MONEY_AMOUNT})\\s*(${MONEY_MARKER})`, 'gi'), amountIndex: 1, currencyIndex: 2 },
+    { expression: new RegExp(`(${MONEY_MARKER})\\s*(${MONEY_AMOUNT})`, 'gi'), amountIndex: 2, currencyIndex: 1 }
+  ];
+  for (const pattern of patterns) {
+    for (const match of raw.matchAll(pattern.expression)) {
+      const currency = normalizeCurrencyMarker(match[pattern.currencyIndex]);
+      const amount = parseAmount(match[pattern.amountIndex]);
+      if (currency && amount !== null) pairs.push({ index: match.index, amount, currency });
+    }
+  }
+  return pairs.sort((left, right) => left.index - right.index);
+}
+
+function explicitCurrencies(raw) {
+  return moneyCurrencyPairs(raw).map(pair => pair.currency);
+}
+
+function parseMoneyDetails(raw, fallbackCurrency, options = {}) {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
 
   const rejectLabels = [...INVALID_MONEY_LABELS, ...(options.rejectLabels || [])];
   if (rejectLabels.some(label => raw.toLocaleLowerCase('pl-PL').includes(String(label).toLocaleLowerCase('pl-PL')))) {
     return null;
   }
-  const amountBeforeCurrency = new RegExp(`(${MONEY_AMOUNT})\\s*${MONEY_CURRENCY}`, 'i').exec(raw);
-  const currencyBeforeAmount = new RegExp(`${MONEY_CURRENCY}\\s*(${MONEY_AMOUNT})`, 'i').exec(raw);
-  const currencyMatch = amountBeforeCurrency || currencyBeforeAmount;
-  if (currencyMatch) return parseAmount(currencyMatch[1]);
+  const pairs = moneyCurrencyPairs(raw);
+  if (pairs.length) {
+    return {
+      amount: pairs[0].amount,
+      currency: pairs[0].currency,
+      explicitCurrencies: pairs.map(pair => pair.currency)
+    };
+  }
+  if (/\d\s*%/.test(raw)) return null;
   if (!fallbackCurrency || explicitCurrency(raw)) return null;
 
   const candidates = [...raw.matchAll(new RegExp(MONEY_AMOUNT, 'g'))];
   const amountCandidate = candidates.find(candidate => !/^\s*(?:dni|dzień|dnia)\b/i.test(raw.slice(candidate.index + candidate[0].length)));
-  return amountCandidate ? parseAmount(amountCandidate[0]) : null;
+  const amount = amountCandidate ? parseAmount(amountCandidate[0]) : null;
+  return amount === null ? null : {
+    amount,
+    currency: String(fallbackCurrency).toUpperCase(),
+    explicitCurrencies: []
+  };
+}
+
+function parseMoney(raw, fallbackCurrency, options = {}) {
+  return parseMoneyDetails(raw, fallbackCurrency, options)?.amount ?? null;
 }
 
 function hasVerifiedTotalPeriod(rentalPeriodText, rentalDays) {
@@ -76,12 +108,14 @@ function hasVerifiedTotalPeriod(rentalPeriodText, rentalDays) {
 function normalizePriceCandidate(input) {
   const rentalDays = input?.rentalDays;
   const verifiedTotal = hasVerifiedTotalPeriod(input?.rentalPeriodText, rentalDays);
-  const displayedAmount = parseMoney(input?.displayedText, input?.fallbackCurrency);
-  const memberAmount = parseMoney(input?.memberText, input?.fallbackCurrency);
-  const displayedCurrencies = explicitCurrencies(input?.displayedText);
-  const memberCurrencies = explicitCurrencies(input?.memberText);
-  const displayedCurrency = displayedCurrencies[0] || null;
-  const memberCurrency = memberCurrencies[0] || null;
+  const displayedDetails = parseMoneyDetails(input?.displayedText, input?.fallbackCurrency);
+  const memberDetails = parseMoneyDetails(input?.memberText, input?.fallbackCurrency);
+  const displayedAmount = displayedDetails?.amount ?? null;
+  const memberAmount = memberDetails?.amount ?? null;
+  const displayedCurrencies = displayedDetails?.explicitCurrencies || [];
+  const memberCurrencies = memberDetails?.explicitCurrencies || [];
+  const displayedCurrency = displayedDetails?.currency ?? null;
+  const memberCurrency = memberDetails?.currency ?? null;
   const fallbackCurrency = typeof input?.fallbackCurrency === 'string' ? input.fallbackCurrency.toUpperCase() : null;
   const expectedCurrency = 'PLN';
   const unexpectedCurrency = [...displayedCurrencies, ...memberCurrencies, fallbackCurrency]
@@ -122,6 +156,14 @@ function isVerifiedPublicOffer(offer) {
     && offer.price_tier === 'public'
     && offer.price_verified === true
     && Number.isFinite(offer.total_price) && offer.total_price > 0);
+}
+
+function isVerifiedConditionalOffer(offer) {
+  return Boolean(offer && typeof offer === 'object'
+    && offer.conditional_price_verified === true
+    && offer.currency === 'PLN'
+    && [offer.conditional_offer_total, offer.conditional_member_total]
+      .some(value => Number.isFinite(value) && value > 0));
 }
 
 function rankVerifiedPublicOffers(offers) {
@@ -174,8 +216,10 @@ function writeTextFile(filePath, content) {
 
 module.exports = {
   parseMoney,
+  parseMoneyDetails,
   normalizePriceCandidate,
   isVerifiedPublicOffer,
+  isVerifiedConditionalOffer,
   rankVerifiedPublicOffers,
   scenarioArtifactRef,
   sanitizeSourceUrl,
