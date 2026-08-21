@@ -2283,6 +2283,19 @@ test('Telegram final summary labels confirmed missing and incomplete MM evidence
   assert.doesNotMatch(message, /Brak MM - pelne dane\n- 2026-09-03/);
 });
 
+test('Telegram final summary does not emit hostile MM date values', () => {
+  const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
+  const message = buildFinalSummary({
+    options: {
+      start_dates: ['2026-09-03', `2026-09-04\nhttps://evil.test/?ticket=secret`],
+      airport_keys: ['ktw'], durations_days: [2]
+    },
+    scenarios: []
+  }, {});
+  assert.match(message, /Nie mozna potwierdzic - niepelne dane\n- 2026-09-03/);
+  assert.doesNotMatch(message, /evil\.test|ticket=secret|\nhttps:/);
+});
+
 test('Telegram summaries reject unsafe links and sanitize hostile malformed inputs deterministically', () => {
   const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
   const hostile = { toString: null };

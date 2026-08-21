@@ -1,9 +1,16 @@
 const { buildScenarioMarketView } = require('./marketView');
 
+function validDateOnly(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
+}
+
 function classifyMmAvailability(payload = {}) {
   const options = payload && typeof payload === 'object' ? payload.options || {} : {};
   const scenarios = Array.isArray(payload?.scenarios) ? payload.scenarios : [];
-  const dates = [...new Set(Array.isArray(options.start_dates) ? options.start_dates.filter(Boolean) : [])].sort();
+  const dates = [...new Set(Array.isArray(options.start_dates) ? options.start_dates.filter(validDateOnly) : [])].sort();
   const airports = [...new Set(Array.isArray(options.airport_keys) ? options.airport_keys.filter(Boolean) : [])].sort();
   const durations = [...new Set(Array.isArray(options.durations_days) ? options.durations_days.filter(Number.isInteger) : [])].sort((a, b) => a - b);
   const rows = dates.map(pickupDate => {
