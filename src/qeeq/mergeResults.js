@@ -2,7 +2,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { writeCsvReport } = require('./report');
-const { buildRootPayload } = require('./run');
+const { buildRootPayload, canonicalArtifactRefs } = require('./run');
 
 const FORBIDDEN_NORMALIZED_FIELDS = new Set([
   'auth', 'authorization', 'businessbid', 'businessid', 'clid', 'cookie', 'cookies', 'fpt',
@@ -161,6 +161,7 @@ function normalizeGroup(group) {
   }
   if (normalized.price_verified !== false) throw new Error('group.price_verified must be false');
   if (normalized.rental_days != null && normalized.rental_days <= 0) throw new Error('group.rental_days must be positive');
+  normalized.quality_errors = normalizeQualityErrors(group.quality_errors);
   return normalized;
 }
 
@@ -195,6 +196,7 @@ function normalizeScenario(scenario) {
   normalized.offers = requireArray(scenario.offers, 'offers').map(normalizeOffer);
   normalized.errors = normalizeErrors(scenario.errors, key).map(error => ({ code: error.code }));
   normalized.quality_errors = normalizeQualityErrors(scenario.quality_errors);
+  normalized.artifact_refs = canonicalArtifactRefs(scenario.artifact_refs);
   return normalized;
 }
 

@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { catalogEntryForLocation } = require('./locations');
 const { loadConfig, parseCliArgs, printHelp } = require('./config');
+const { isVerifiedPublicOffer } = require('./utils');
 
 const OFFER_FIELDS = [
   'vehicle_name', 'vehicle_category', 'transmission', 'seats', 'doors', 'luggage',
@@ -12,6 +13,7 @@ const OFFER_FIELDS = [
   'price_scope', 'price_verified', 'conditional_price_verified', 'parsing_source',
   'source_search_url', 'captured_at'
 ];
+const FAILURE_ARTIFACT_REF = /^failure\/[a-f0-9]{16}\/attempt-\d+\/\d{8}T\d{9}Z\/(?:browser\.log|screenshot\.png|sanitized-dom\.html|error\.json)$/;
 
 function cleanCode(value) {
   return typeof value === 'string' && /^[a-z0-9_:-]+$/i.test(value) ? value : 'execution_failed';
@@ -19,6 +21,19 @@ function cleanCode(value) {
 
 function arrayOf(value) {
   return Array.isArray(value) ? value : [];
+}
+
+function canonicalArtifactRefs(value, artifactsDir = null) {
+  const root = typeof artifactsDir === 'string' ? artifactsDir.replace(/\\/g, '/').replace(/\/+$/, '') : null;
+  if (root && (/^(?:[A-Za-z]:|\/)/.test(root) || root.split('/').includes('..'))) return [];
+  const refs = arrayOf(value).flatMap(reference => {
+    if (typeof reference !== 'string' || /[\u0000-\u001f\u007f?#]/.test(reference)) return [];
+    const normalized = reference.replace(/\\/g, '/');
+    if (/^(?:[A-Za-z]:|\/)/.test(normalized) || normalized.split('/').includes('..')) return [];
+    const relative = root ? (normalized.startsWith(`${root}/`) ? normalized.slice(root.length + 1) : null) : normalized;
+    return relative && FAILURE_ARTIFACT_REF.test(relative) ? [relative] : [];
+  });
+  return [...new Set(refs)].sort();
 }
 
 function canonicalSourceSearchUrl(value) {
@@ -68,11 +83,13 @@ function buildScenarioPayload(input = {}) {
     groups: arrayOf(outcome.groups).map(group => ({
       record_type: 'group', vehicle_name: group?.vehicle_name ?? null,
       price_verified: false, rental_days: group?.rental_days ?? scenario.rentalDays ?? null,
-      parsing_source: group?.parsing_source ?? null
+      parsing_source: group?.parsing_source ?? null,
+      quality_errors: [...new Set(arrayOf(group?.quality_errors).map(cleanCode))].sort()
     })),
     offers,
     errors,
-    quality_errors: qualityErrors
+    quality_errors: qualityErrors,
+    artifact_refs: canonicalArtifactRefs(outcome.artifacts, input.config?.artifactsDir)
   };
 }
 
@@ -116,7 +133,7 @@ function buildRootPayload(input = {}) {
   const completedChecks = scenarios.filter(scenario => scenario.status === 'success').length;
   const failedChecks = scenarios.filter(scenario => scenario.status !== 'success').length;
   const verified = scenarios.flatMap(scenario => arrayOf(scenario.offers))
-    .filter(offer => offer.price_tier === 'public' && offer.price_verified === true && Number.isFinite(offer.total_price)).length;
+    .filter(isVerifiedPublicOffer).length;
   const unverified = scenarios.flatMap(scenario => arrayOf(scenario.offers)).length - verified;
   const qualityErrors = [...new Set([
     ...scenarios.flatMap(scenario => arrayOf(scenario.quality_errors)),
@@ -304,6 +321,7 @@ if (require.main === module) {
 
 module.exports = {
   assertScenarioLimit,
+  canonicalArtifactRefs,
   buildRootPayload,
   buildScenarioPayload,
   deriveStatuses,

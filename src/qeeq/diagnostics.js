@@ -68,7 +68,7 @@ function htmlEscape(value) {
 }
 
 function sanitizedDomDocument(rawText) {
-  if (typeof rawText !== 'string' || !rawText.trim() || rawText.length > MAX_DOM_TEXT_LENGTH) return null;
+  if (typeof rawText !== 'string' || !rawText.trim() || rawText.length > MAX_DOM_TEXT_LENGTH || UNSAFE_TEXT.test(rawText)) return null;
   const clean = artifactText(rawText);
   if (!clean || UNSAFE_TEXT.test(clean)) return null;
   return `<!doctype html><meta charset="utf-8"><title>Sanitized QEEQ diagnostic</title><pre>${htmlEscape(clean)}</pre>\n`;
@@ -133,9 +133,9 @@ function createFailureArtifactSession(config = {}, scenario = {}, attempt = 0, n
       const root = safeArtifactRoot(config.artifactsDir);
       const scenarioRef = crypto.createHash('sha256').update(String(scenario?.key || 'unknown')).digest('hex').slice(0, 16);
       const capturedAt = new Date(now()).toISOString();
-      const suffix = `${capturedAt.replace(/[^0-9]/g, '')}-${crypto.randomUUID()}`;
-      const directory = path.join(root, `scenario-${scenarioRef}-attempt-${Number(attempt) || 0}-${suffix}`);
-      fs.mkdirSync(directory, { recursive: false });
+      const timestamp = capturedAt.replace(/[-:.]/g, '');
+      const directory = path.join(root, 'failure', scenarioRef, `attempt-${Number(attempt) || 0}`, timestamp);
+      fs.mkdirSync(directory, { recursive: true });
       const references = [];
       const rawErrorCode = safeCall(() => error?.code, '');
       const errorCode = typeof rawErrorCode === 'string' && /^[a-z0-9_:-]+$/i.test(rawErrorCode) && !UNSAFE_TEXT.test(rawErrorCode)

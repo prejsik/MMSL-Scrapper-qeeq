@@ -8,7 +8,11 @@ const CONDITIONAL_LABEL = /diament|diamond|member|członk|log\s*in|sign\s*in|zal
 const REDACTED_FIELD = /\b(id|bid|clid|_vv_|fpt|ticket|ts|qeeq_fpt)\b\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|[^\s&#,;"']+)/gi;
 const REDACTED_HEADER = /\b(cookie|authorization)\s*(?::|=)\s*[^\r\n]*/gi;
 const REDACTED_BEARER = /\bbearer\s+(?:"[^"]*"|'[^']*'|[^\s,;"']+)/gi;
-const FORBIDDEN_CSV_KEYS = new Set(['id', 'clid', '_vv_', 'fpt', 'ticket', 'ts', 'qeeq_fpt']);
+const FORBIDDEN_CSV_KEYS = new Set(['id', 'bid', 'businessid', 'businessbid', 'clid', 'vv', 'fpt', 'ticket', 'ts', 'qeeqfpt']);
+
+function normalizedFieldName(value) {
+  return String(value).toLowerCase().replace(/[^a-z0-9]/g, '');
+}
 
 function parseAmount(value) {
   const normalized = value.replace(/[ .\u00a0]/g, '').replace(',', '.');
@@ -17,15 +21,23 @@ function parseAmount(value) {
 }
 
 function explicitCurrency(raw) {
-  if (typeof raw !== 'string') return null;
-  if (/zł/i.test(raw)) return 'PLN';
-  if (raw.includes('€')) return 'EUR';
-  if (raw.includes('$')) return 'USD';
-  if (raw.includes('£')) return 'GBP';
-  const known = /\b(PLN|EUR|USD|GBP)\b/i.exec(raw);
-  if (known) return known[1].toUpperCase();
-  const isoCode = /\b[A-Z]{3}\b/.exec(raw);
-  return isoCode ? isoCode[0] : null;
+  return explicitCurrencies(raw)[0] || null;
+}
+
+function explicitCurrencies(raw) {
+  if (typeof raw !== 'string') return [];
+  const currencies = [];
+  for (const match of raw.matchAll(/zł|€|\$|£|\b[A-Za-z]{3}\b/g)) {
+    const marker = match[0];
+    const upper = marker.toUpperCase();
+    if (/^zł$/i.test(marker)) currencies.push('PLN');
+    else if (marker === '€') currencies.push('EUR');
+    else if (marker === '$') currencies.push('USD');
+    else if (marker === '£') currencies.push('GBP');
+    else if (['PLN', 'EUR', 'USD', 'GBP'].includes(upper)) currencies.push(upper);
+    else if (marker === upper) currencies.push(marker);
+  }
+  return currencies;
 }
 
 function parseMoney(raw, fallbackCurrency, options = {}) {
@@ -58,20 +70,24 @@ function normalizePriceCandidate(input) {
   const verifiedTotal = hasVerifiedTotalPeriod(input?.rentalPeriodText, rentalDays);
   const displayedAmount = parseMoney(input?.displayedText, input?.fallbackCurrency);
   const memberAmount = parseMoney(input?.memberText, input?.fallbackCurrency);
-  const displayedCurrency = explicitCurrency(input?.displayedText);
-  const memberCurrency = explicitCurrency(input?.memberText);
+  const displayedCurrencies = explicitCurrencies(input?.displayedText);
+  const memberCurrencies = explicitCurrencies(input?.memberText);
+  const displayedCurrency = displayedCurrencies[0] || null;
+  const memberCurrency = memberCurrencies[0] || null;
   const fallbackCurrency = typeof input?.fallbackCurrency === 'string' ? input.fallbackCurrency.toUpperCase() : null;
   const expectedCurrency = 'PLN';
-  const unexpectedCurrency = [displayedCurrency, memberCurrency, fallbackCurrency]
+  const unexpectedCurrency = [...displayedCurrencies, ...memberCurrencies, fallbackCurrency]
     .find(currency => currency && currency !== expectedCurrency) || null;
+  const ambiguousCurrency = displayedCurrencies.length > 1 || memberCurrencies.length > 1;
+  const currencyProblem = Boolean(unexpectedCurrency) || ambiguousCurrency;
   const displayedIsConditional = Boolean(input?.discountType)
     || (typeof input?.displayedText === 'string' && CONDITIONAL_LABEL.test(input.displayedText))
     || (memberAmount === null && typeof input?.memberText === 'string' && CONDITIONAL_LABEL.test(input.memberText));
   const hasConditionalPrice = displayedIsConditional || memberAmount !== null;
   const conditionalOffer = displayedIsConditional ? displayedAmount : null;
   const conditionalMember = memberAmount;
-  const conditionalVerified = verifiedTotal && !unexpectedCurrency && (conditionalOffer !== null || conditionalMember !== null);
-  const publicVerified = verifiedTotal && !unexpectedCurrency && !displayedIsConditional && displayedAmount !== null;
+  const conditionalVerified = verifiedTotal && !currencyProblem && (conditionalOffer !== null || conditionalMember !== null);
+  const publicVerified = verifiedTotal && !currencyProblem && !displayedIsConditional && displayedAmount !== null;
 
   return {
     total_price: publicVerified ? displayedAmount : null,
@@ -86,13 +102,23 @@ function normalizePriceCandidate(input) {
     price_verified: publicVerified,
     conditional_price_verified: conditionalVerified,
     currency: unexpectedCurrency || displayedCurrency || memberCurrency || fallbackCurrency || expectedCurrency,
-    quality_errors: unexpectedCurrency ? ['unexpected_currency'] : []
+    quality_errors: currencyProblem ? ['unexpected_currency'] : []
   };
+}
+
+function isVerifiedPublicOffer(offer) {
+  return Boolean(offer && typeof offer === 'object'
+    && (offer.record_type == null || offer.record_type === 'offer')
+    && typeof offer.provider_name === 'string' && offer.provider_name.trim()
+    && offer.currency === 'PLN'
+    && offer.price_tier === 'public'
+    && offer.price_verified === true
+    && Number.isFinite(offer.total_price) && offer.total_price > 0);
 }
 
 function rankVerifiedPublicOffers(offers) {
   return offers
-    .filter(offer => offer.price_tier === 'public' && offer.price_verified === true && Number.isFinite(offer.total_price))
+    .filter(isVerifiedPublicOffer)
     .slice()
     .sort((left, right) => left.total_price - right.total_price);
 }
@@ -113,12 +139,13 @@ function sanitizeDiagnosticText(text) {
     .replace(/https?:\/\/[^\s"']+/gi, match => sanitizeSourceUrl(match))
     .replace(REDACTED_HEADER, (_, field) => `${field}=[redacted]`)
     .replace(REDACTED_BEARER, 'Bearer [redacted]')
-    .replace(REDACTED_FIELD, (_, field) => `${field}=[redacted]`);
+    .replace(REDACTED_FIELD, (_, field) => `${field}=[redacted]`)
+    .replace(/\b[A-Za-z0-9_-]{24,}\b/g, '[redacted]');
 }
 
 function toCsv(rows) {
   if (!Array.isArray(rows) || rows.length === 0) return '';
-  const headers = [...new Set(rows.flatMap(row => Object.keys(row || {}).filter(key => !FORBIDDEN_CSV_KEYS.has(key.toLowerCase()))))];
+  const headers = [...new Set(rows.flatMap(row => Object.keys(row || {}).filter(key => !FORBIDDEN_CSV_KEYS.has(normalizedFieldName(key)))))];
   const escape = value => {
     const safeValue = typeof value === 'string' && /^\s*[=+\-@]/.test(value) ? `'${value}` : value;
     return `"${String(safeValue ?? '').replace(/"/g, '""')}"`;
@@ -140,6 +167,7 @@ function writeTextFile(filePath, content) {
 module.exports = {
   parseMoney,
   normalizePriceCandidate,
+  isVerifiedPublicOffer,
   rankVerifiedPublicOffers,
   sanitizeSourceUrl,
   sanitizeDiagnosticText,

@@ -191,10 +191,10 @@ test('ranking excludes Diamond-only and unverified prices', () => {
   const { rankVerifiedPublicOffers } = require('../src/qeeq/utils');
   const ranked = rankVerifiedPublicOffers([
     { id: 'diamond', price_tier: 'diamond', price_verified: true, total_price: 98 },
-    { id: 'public-b', price_tier: 'public', price_verified: true, total_price: 119 },
+    { id: 'public-b', provider_name: 'PUBLIC B', currency: 'PLN', price_tier: 'public', price_verified: true, total_price: 119 },
     { id: 'unknown', price_tier: 'public', price_verified: false, total_price: 90 },
     { id: 'newcomer', price_tier: 'conditional', price_verified: false, conditional_offer_total: 106 },
-    { id: 'public-a', price_tier: 'public', price_verified: true, total_price: 110 }
+    { id: 'public-a', provider_name: 'PUBLIC A', currency: 'PLN', price_tier: 'public', price_verified: true, total_price: 110 }
   ]);
   assert.deepEqual(ranked.map(item => item.id), ['public-a', 'public-b']);
 });
@@ -298,7 +298,7 @@ test('group-only observations do not enter Top 3', () => {
   const result = selectTopPublicOffers([
     { record_type: 'group', total_price: 90, price_tier: 'public', price_verified: true },
     { record_type: 'offer', conditional_offer_total: 106, price_tier: 'conditional', price_verified: false, provider_name: 'CARWIZ' },
-    { record_type: 'offer', total_price: 119, price_tier: 'public', price_verified: true, provider_name: 'PUBLIC PROVIDER' }
+    { record_type: 'offer', total_price: 119, currency: 'PLN', price_tier: 'public', price_verified: true, provider_name: 'PUBLIC PROVIDER' }
   ], 3);
   assert.equal(result.length, 1);
   assert.equal(result[0].provider_name, 'PUBLIC PROVIDER');
@@ -1069,7 +1069,7 @@ test('exit code accepts only exact known successful and warning states', () => {
 test('verified conditional price does not downgrade otherwise valid public quality', () => {
   const { buildRootPayload } = require('../src/qeeq/run');
   const payload = buildRootPayload({ expected_checks: 1, scenarios: [{ key: 'a', status: 'success', errors: [], quality_errors: [], offers: [
-    { record_type: 'offer', price_tier: 'public', price_verified: true, conditional_price_verified: false, total_price: 100, currency: 'PLN' },
+    { record_type: 'offer', provider_name: 'PUBLIC', price_tier: 'public', price_verified: true, conditional_price_verified: false, total_price: 100, currency: 'PLN' },
     { record_type: 'offer', price_tier: 'conditional', price_verified: false, conditional_price_verified: true, conditional_offer_total: 90, currency: 'PLN' }
   ] }] });
   assert.equal(payload.quality_status, 'pass');
@@ -3361,4 +3361,167 @@ test('smoke workflow evaluates canonical acceptance but uploads diagnostics befo
   assert.match(yaml.slice(upload, finalStatus), /if:\s*always\(\)/);
   assert.match(yaml.slice(finalStatus), /ACCEPTANCE_OUTCOME:/);
   assert.match(yaml.slice(finalStatus), /\$ACCEPTANCE_OUTCOME.*success/);
+});
+
+test('canonical build and merge preserve only safe failure artifact refs and group diagnostics', () => {
+  const { buildScenarioPayload } = require('../src/qeeq/run');
+  const { mergePayloads } = require('../src/qeeq/mergeResults');
+  const safeBase = 'failure/0123456789abcdef/attempt-0/20260821T010203000Z';
+  const scenario = buildScenarioPayload({
+    scenario: {
+      key: 'katowice-pyrzowice:2026-08-22:2',
+      airport: { key: 'katowice-pyrzowice', iata: 'KTW' },
+      pickupDate: '2026-08-22', pickupTime: '10:00',
+      dropoffDate: '2026-08-24', dropoffTime: '10:00', rentalDays: 2
+    },
+    config: { artifactsDir: 'artifacts/qeeq' },
+    outcome: {
+      status: 'failure', error_code: 'scenario_failed', errors: [{ code: 'scenario_failed' }],
+      groups: [{ record_type: 'group', vehicle_name: 'Unreadable', price_verified: false, rental_days: 2, parsing_source: 'dom', quality_errors: ['price_unverified', 'ticket=SECRET'] }],
+      offers: [], quality_errors: ['price_unverified'],
+      artifacts: [
+        `artifacts/qeeq/${safeBase}/error.json`,
+        `artifacts/qeeq/${safeBase}/screenshot.png`,
+        'C:/absolute/error.json',
+        'artifacts/qeeq/../outside/error.json',
+        'artifacts/qeeq/failure/0123456789abcdef/attempt-0/20260821T010203000Z/error.json?ticket=SECRET',
+        'artifacts/qeeq/failure/ABCDEFGHIJKLMNOPQRSTUVWXYZ123456/attempt-0/20260821T010203000Z/error.json',
+        'artifacts/qeeq/id=BUSINESS_SECRET/error.json'
+      ]
+    }
+  });
+
+  assert.deepEqual(scenario.artifact_refs, [`${safeBase}/error.json`, `${safeBase}/screenshot.png`]);
+  assert.deepEqual(scenario.groups[0].quality_errors, ['execution_failed', 'price_unverified']);
+  assert.doesNotMatch(JSON.stringify(scenario.artifact_refs), /artifacts\/qeeq|BUSINESS_SECRET|SECRET|ticket|\.\.|[?#]/i);
+
+  const merged = mergePayloads([{
+    file: 'part.json',
+    payload: { schema_version: 1, provider: 'qeeq.pl', expected_scenarios: 1, expected_checks: 1, scenarios: [scenario], errors: [] }
+  }]);
+  assert.deepEqual(merged.scenarios[0].artifact_refs, scenario.artifact_refs);
+  assert.deepEqual(merged.scenarios[0].groups[0].quality_errors, scenario.groups[0].quality_errors);
+});
+
+test('one verified-public predicate rejects blank providers nonpositive totals non-PLN and groups', () => {
+  const { buildRootPayload } = require('../src/qeeq/run');
+  const { isVerifiedPublicOffer, rankVerifiedPublicOffers } = require('../src/qeeq/utils');
+  const valid = {
+    record_type: 'offer', provider_name: 'PUBLIC', currency: 'PLN',
+    price_tier: 'public', price_verified: true, total_price: 119
+  };
+  assert.equal(isVerifiedPublicOffer(valid), true);
+  assert.deepEqual(rankVerifiedPublicOffers([valid]), [valid]);
+
+  const rejected = [
+    { ...valid, provider_name: '' },
+    { ...valid, provider_name: '   ' },
+    { ...valid, total_price: 0 },
+    { ...valid, total_price: -1 },
+    { ...valid, currency: 'EUR' },
+    { ...valid, record_type: 'group' }
+  ];
+  for (const offer of rejected) {
+    assert.equal(isVerifiedPublicOffer(offer), false);
+    assert.deepEqual(rankVerifiedPublicOffers([offer]), []);
+    const payload = buildRootPayload({
+      expected_checks: 1,
+      scenarios: [{ key: 'a', status: 'success', errors: [], quality_errors: [], offers: [offer] }]
+    });
+    assert.equal(payload.quality.verified_public_offer_count, 0);
+    assert.notEqual(payload.quality_status, 'pass');
+  }
+
+  const canonicalWithoutRecordType = { ...valid };
+  delete canonicalWithoutRecordType.record_type;
+  assert.equal(isVerifiedPublicOffer(canonicalWithoutRecordType), true);
+});
+
+test('shared diagnostics redact unlabelled opaque tokens in HTML and failure files', async () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { sanitizeDiagnosticText } = require('../src/qeeq/utils');
+  const { buildHtmlReport } = require('../src/qeeq/reportHtml');
+  const { createFailureArtifactSession } = require('../src/qeeq/diagnostics');
+  const token = 'AbCdEfGhIjKlMnOpQrStUvWxYz012345';
+  const diagnostic = `location_id_drift ${token}`;
+
+  const clean = sanitizeDiagnosticText(diagnostic);
+  assert.match(clean, /location_id_drift/);
+  assert.doesNotMatch(clean, new RegExp(token));
+  assert.match(clean, /\[redacted\]/);
+
+  const html = buildHtmlReport({
+    run_status: 'success', quality_status: 'warning',
+    quality: { quality_errors: [diagnostic] }, scenarios: []
+  });
+  assert.match(html, /location_id_drift/);
+  assert.doesNotMatch(html, new RegExp(token));
+
+  const root = fs.mkdtempSync(path.join(process.cwd(), 'output', 'qeeq-token-artifacts-'));
+  const listeners = new Map();
+  const page = {
+    on: (event, listener) => listeners.set(event, listener),
+    off: event => listeners.delete(event),
+    url: () => 'https://www.qeeq.pl/car/search',
+    screenshot: async () => Buffer.from('SAFE_SCREENSHOT'),
+    evaluate: async () => `Visible ${token}`
+  };
+  try {
+    const session = createFailureArtifactSession(
+      { artifactsDir: path.relative(process.cwd(), root) }, { key: 'safe' }, 0,
+      () => new Date('2026-08-21T01:02:03.000Z')
+    );
+    session.attach(page);
+    listeners.get('console')({ type: () => 'error', text: () => diagnostic });
+    const refs = await session.capture(Object.assign(new Error(diagnostic), { code: 'scenario_failed' }));
+    assert.equal(refs.some(ref => ref.endsWith('sanitized-dom.html')), false);
+    const written = refs.filter(ref => !ref.endsWith('.png')).map(ref => fs.readFileSync(path.resolve(ref), 'utf8')).join('\n');
+    assert.match(written, /location_id_drift/);
+    assert.doesNotMatch(written, new RegExp(token));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('multiple explicit currency markers never become verified PLN prices', () => {
+  const { normalizePriceCandidate, rankVerifiedPublicOffers } = require('../src/qeeq/utils');
+  const base = { rentalPeriodText: 'łącznie za 2 dni', rentalDays: 2 };
+  const cases = [
+    { displayedText: 'Cena 119 zł (30 EUR)', expectedCurrency: 'EUR' },
+    { displayedText: '119 PLN / 30 USD', expectedCurrency: 'USD' },
+    { displayedText: '119 EUR / 30 zł', expectedCurrency: 'EUR' },
+    { displayedText: 'Cena 119 zł', memberText: 'Cena Diamentowa 98 zł (24 EUR)', expectedCurrency: 'EUR' }
+  ];
+
+  for (const fixture of cases) {
+    const result = normalizePriceCandidate({ ...base, ...fixture });
+    assert.equal(result.currency, fixture.expectedCurrency);
+    assert.equal(result.total_price, null);
+    assert.equal(result.price_verified, false);
+    assert.equal(result.conditional_price_verified, false);
+    assert.deepEqual(result.quality_errors, ['unexpected_currency']);
+    assert.deepEqual(rankVerifiedPublicOffers([{
+      record_type: 'offer', provider_name: 'PUBLIC', ...result
+    }]), []);
+  }
+
+  const pln = normalizePriceCandidate({ ...base, displayedText: 'Cena 119 zł' });
+  assert.equal(pln.currency, 'PLN');
+  assert.equal(pln.total_price, 119);
+  assert.equal(pln.price_verified, true);
+  const uppercasePln = normalizePriceCandidate({ ...base, displayedText: 'CENA 119 ZŁ' });
+  assert.equal(uppercasePln.currency, 'PLN');
+  assert.equal(uppercasePln.total_price, 119);
+  assert.equal(uppercasePln.price_verified, true);
+});
+
+test('direct CSV export drops normalized business identifier keys', () => {
+  const { toCsv } = require('../src/qeeq/utils');
+  const csv = toCsv([{
+    safe: 'ok', bid: 'BID_SECRET', businessId: 'ID_SECRET',
+    businessBid: 'BUSINESS_BID_SECRET', business_bid: 'SNAKE_SECRET'
+  }]);
+  assert.equal(csv, '"safe"\n"ok"');
+  assert.doesNotMatch(csv, /BID_SECRET|ID_SECRET|BUSINESS_BID_SECRET|SNAKE_SECRET|business/i);
 });
