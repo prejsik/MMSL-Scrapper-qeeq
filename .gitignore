@@ -3,6 +3,7 @@ output/
 artifacts/
 downloaded-parts/
 .playwright-cli/
+.worktrees/
 .env
 *.log
 *.tmp
