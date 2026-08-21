@@ -4660,6 +4660,40 @@ test('Excel updater selects duration bands, applies group adjustments, and count
   assert.equal(summary.unmatched_count, 1);
 });
 
+test('Excel updater applies a present tariff zone and reports each absent zone target once', async t => {
+  const fs = require('node:fs');
+  const ExcelJS = require('exceljs');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const baseline = new ExcelJS.Workbook();
+  await baseline.xlsx.readFile(fixture.baselinePath);
+  baseline.getWorksheet('Sheet1').getCell('D6').value = 'KRLO';
+  await baseline.xlsx.writeFile(fixture.baselinePath);
+  const recommendation = {
+    scenario_key: 'krakow-balice:2026-09-10:2', airport_key: 'krakow-balice',
+    tariff_zones: ['KRLO', 'KRTI'], pickup_date: '2026-09-10', rental_days: 2,
+    calibration_status: 'approved', import_action: 'increase', suggested_rate_pln_day: 92,
+    data_quality_status: 'complete'
+  };
+  fs.writeFileSync(fixture.recommendationsPath, JSON.stringify({
+    schema_version: 1, provider: 'qeeq.pl', decisions: [recommendation], import_recommendations: [recommendation]
+  }));
+
+  const summary = await generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+  });
+  const output = new ExcelJS.Workbook();
+  await output.xlsx.readFile(fixture.outputPath);
+  assert.equal(output.getWorksheet('Sheet1').getCell('I6').value, 92);
+  assert.equal(summary.applied_count, 1);
+  assert.equal(summary.unmatched_count, 1);
+  assert.deepEqual(summary.unmatched_targets, [
+    { tariff_zone: 'KRTI', pickup_date: '2026-09-10', rental_days: 2 }
+  ]);
+});
+
 test('Excel updater preserves formulas, styles, dimensions, and merged cells', async t => {
   const fs = require('node:fs');
   const ExcelJS = require('exceljs');
@@ -4707,6 +4741,50 @@ test('Excel updater rejects path collisions and invalid active recommendations b
   assert.equal(fs.existsSync(fixture.summaryPath), false);
 });
 
+test('Excel updater rejects a source-output collision reached through a directory junction alias', async t => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  const alias = path.join(os.tmpdir(), `${path.basename(fixture.directory)}-junction`);
+  fs.symlinkSync(fixture.directory, alias, 'junction');
+  t.after(() => {
+    if (fs.existsSync(alias)) {
+      const stat = fs.lstatSync(alias);
+      if (stat.isSymbolicLink()) fs.unlinkSync(alias);
+      else fs.rmdirSync(alias);
+    }
+    fs.rmSync(fixture.directory, { recursive: true, force: true });
+  });
+  await assert.rejects(() => generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: path.join(alias, 'baseline.xlsx'), summaryPath: fixture.summaryPath
+  }), /paths must be distinct/i);
+  assert.equal(fs.existsSync(fixture.summaryPath), false);
+});
+
+test('Excel updater rejects a symbolic-link input file when the platform permits creating one', async t => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const alias = path.join(fixture.directory, 'recommendations-link.json');
+  try {
+    fs.symlinkSync(fixture.recommendationsPath, alias, 'file');
+  } catch (error) {
+    t.diagnostic(`symbolic-link creation unavailable: ${error.code || error.message}`);
+    t.skip('platform does not permit creating a file symbolic link in the temporary directory');
+    return;
+  }
+  await assert.rejects(() => generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: alias,
+    configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+  }), /regular file/i);
+  assert.equal(fs.existsSync(fixture.outputPath), false);
+});
+
 test('Excel updater rejects duplicate recommendation keys and leaves review items untouched', async t => {
   const fs = require('node:fs');
   const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
@@ -4720,6 +4798,23 @@ test('Excel updater rejects duplicate recommendation keys and leaves review item
     configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
   }), /duplicate recommendation key/i);
   assert.equal(fs.existsSync(fixture.outputPath), false);
+});
+
+test('Excel updater rejects formula-like unmatched target text before writing a summary', async t => {
+  const fs = require('node:fs');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const payload = JSON.parse(fs.readFileSync(fixture.recommendationsPath, 'utf8'));
+  payload.decisions[0].tariff_zones = ['=2+2'];
+  payload.import_recommendations[0].tariff_zones = ['=2+2'];
+  fs.writeFileSync(fixture.recommendationsPath, JSON.stringify(payload));
+  await assert.rejects(() => generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+  }), /approved finite positive rate and mapped inputs/i);
+  assert.equal(fs.existsSync(fixture.outputPath), false);
+  assert.equal(fs.existsSync(fixture.summaryPath), false);
 });
 
 test('Excel updater atomic rename failure preserves an existing output and removes temporary files', async t => {

@@ -98,7 +98,7 @@ function validateRecommendationPayload(payload) {
         || !validIsoDate(recommendation.pickup_date)
         || !Number.isInteger(recommendation.rental_days) || recommendation.rental_days <= 0
         || !Array.isArray(recommendation.tariff_zones) || recommendation.tariff_zones.length === 0
-        || recommendation.tariff_zones.some(zone => typeof zone !== 'string' || !zone.trim())) {
+        || recommendation.tariff_zones.some(zone => typeof zone !== 'string' || !/^[A-Z0-9_-]{1,32}$/.test(zone))) {
       throw new Error('Active import recommendations require an approved finite positive rate and mapped inputs');
     }
     const uniqueZones = [...new Set(recommendation.tariff_zones.map(zone => zone.trim()))];
@@ -131,6 +131,7 @@ function summaryFromPayload(payload) {
     skipped_count: 0,
     unmapped_count: payload.decisions.filter(item => item.tariff_zones.length === 0).length,
     unmatched_count: 0,
+    unmatched_targets: [],
     changed_cells: []
   };
 }
@@ -142,43 +143,53 @@ function applyRecommendationsToWorkbook(workbook, payload, suppliedConfig) {
   const excluded = new Set(config.excludedGroups.map(value => value.trim()));
   const operations = [];
   const summary = summaryFromPayload(payload);
+  const recordUnmatched = (recommendation, zone) => {
+    summary.unmatched_targets.push({
+      tariff_zone: zone,
+      pickup_date: recommendation.pickup_date,
+      rental_days: recommendation.rental_days
+    });
+  };
 
   for (const recommendation of payload.import_recommendations) {
     const column = durationColumn(sheet, recommendation.rental_days, config);
     if (column === null) {
-      summary.unmatched_count += 1;
+      recommendation.tariff_zones.forEach(zone => recordUnmatched(recommendation, zone));
       continue;
     }
-    let matchingRows = 0;
-    let eligibleRows = 0;
-    for (let rowNumber = config.dataStartRow; rowNumber <= sheet.rowCount; rowNumber += 1) {
-      const row = sheet.getRow(rowNumber);
-      const zone = String(row.getCell(config.columns.zone).value || '').trim();
-      const date = normalizeDateCell(row.getCell(config.columns.pickupStartDate).value);
-      if (!recommendation.tariff_zones.includes(zone) || date !== recommendation.pickup_date) continue;
-      matchingRows += 1;
-      const group = String(row.getCell(config.columns.group).value || '').trim();
-      if (excluded.has(group)) {
-        summary.skipped_count += 1;
-        continue;
+    for (const targetZone of recommendation.tariff_zones) {
+      let matchingRows = 0;
+      for (let rowNumber = config.dataStartRow; rowNumber <= sheet.rowCount; rowNumber += 1) {
+        const row = sheet.getRow(rowNumber);
+        const zone = String(row.getCell(config.columns.zone).value || '').trim();
+        const date = normalizeDateCell(row.getCell(config.columns.pickupStartDate).value);
+        if (zone !== targetZone || date !== recommendation.pickup_date) continue;
+        matchingRows += 1;
+        const group = String(row.getCell(config.columns.group).value || '').trim();
+        if (excluded.has(group)) {
+          summary.skipped_count += 1;
+          continue;
+        }
+        const adjustment = config.groupRateAdjustmentsPlnDay[group] ?? 0;
+        const newRate = recommendation.suggested_rate_pln_day + adjustment;
+        const cell = row.getCell(column);
+        if (!Number.isFinite(newRate) || newRate <= 0 || !Number.isFinite(cell.value)) {
+          throw new Error(`Invalid rate cell or adjusted recommendation at ${cell.address}`);
+        }
+        if (Math.abs(newRate - cell.value) < config.minExcelChangePlnDay) {
+          summary.skipped_count += 1;
+          continue;
+        }
+        operations.push({ cell, oldRate: cell.value, newRate });
       }
-      eligibleRows += 1;
-      const adjustment = config.groupRateAdjustmentsPlnDay[group] ?? 0;
-      const newRate = recommendation.suggested_rate_pln_day + adjustment;
-      const cell = row.getCell(column);
-      if (!Number.isFinite(newRate) || newRate <= 0 || !Number.isFinite(cell.value)) {
-        throw new Error(`Invalid rate cell or adjusted recommendation at ${cell.address}`);
-      }
-      if (Math.abs(newRate - cell.value) < config.minExcelChangePlnDay) {
-        summary.skipped_count += 1;
-        continue;
-      }
-      operations.push({ cell, oldRate: cell.value, newRate });
-    }
-    if (matchingRows === 0 || (matchingRows > 0 && eligibleRows === 0 && summary.skipped_count === 0)) {
-      summary.unmatched_count += 1;
+      if (matchingRows === 0) recordUnmatched(recommendation, targetZone);
     }
   }
+
+  summary.unmatched_targets.sort((left, right) => left.pickup_date.localeCompare(right.pickup_date)
+    || left.rental_days - right.rental_days
+    || left.tariff_zone.localeCompare(right.tariff_zone));
+  summary.unmatched_count = summary.unmatched_targets.length;
 
   for (const operation of operations) {
     operation.cell.value = operation.newRate;
