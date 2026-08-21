@@ -1070,7 +1070,7 @@ test('verified conditional price does not downgrade otherwise valid public quali
   const { buildRootPayload } = require('../src/qeeq/run');
   const payload = buildRootPayload({ expected_checks: 1, scenarios: [{ key: 'a', status: 'success', errors: [], quality_errors: [], offers: [
     { record_type: 'offer', provider_name: 'PUBLIC', price_tier: 'public', price_verified: true, conditional_price_verified: false, total_price: 100, currency: 'PLN' },
-    { record_type: 'offer', price_tier: 'conditional', price_verified: false, conditional_price_verified: true, conditional_offer_total: 90, currency: 'PLN' }
+    { record_type: 'offer', provider_name: 'MEMBER', price_tier: 'conditional', price_verified: false, conditional_price_verified: true, conditional_offer_total: 90, currency: 'PLN' }
   ] }] });
   assert.equal(payload.quality_status, 'pass');
   assert.equal(payload.quality.quality_errors.includes('price_unverified'), false);
@@ -3364,12 +3364,15 @@ test('smoke workflow evaluates canonical acceptance but uploads diagnostics befo
 });
 
 test('canonical build and merge preserve only safe failure artifact refs and group diagnostics', () => {
+  const crypto = require('node:crypto');
   const { buildScenarioPayload } = require('../src/qeeq/run');
   const { mergePayloads } = require('../src/qeeq/mergeResults');
-  const safeBase = 'failure/0123456789abcdef/attempt-0/20260821T010203000Z';
+  const key = 'katowice-pyrzowice:2026-08-22:2';
+  const scenarioHash = crypto.createHash('sha256').update(key).digest('hex').slice(0, 16);
+  const safeBase = `failure/${scenarioHash}/attempt-0/20260821T010203000Z`;
   const scenario = buildScenarioPayload({
     scenario: {
-      key: 'katowice-pyrzowice:2026-08-22:2',
+      key,
       airport: { key: 'katowice-pyrzowice', iata: 'KTW' },
       pickupDate: '2026-08-22', pickupTime: '10:00',
       dropoffDate: '2026-08-24', dropoffTime: '10:00', rentalDays: 2
@@ -3524,4 +3527,131 @@ test('direct CSV export drops normalized business identifier keys', () => {
   }]);
   assert.equal(csv, '"safe"\n"ok"');
   assert.doesNotMatch(csv, /BID_SECRET|ID_SECRET|BUSINESS_BID_SECRET|SNAKE_SECRET|business/i);
+});
+
+test('root quality includes safe group diagnostics beside a valid public offer', () => {
+  const { buildRootPayload } = require('../src/qeeq/run');
+  const valid = {
+    record_type: 'offer', provider_name: 'PUBLIC', currency: 'PLN',
+    price_tier: 'public', price_verified: true, conditional_price_verified: false,
+    total_price: 119
+  };
+  const payload = buildRootPayload({
+    expected_checks: 1,
+    scenarios: [{
+      key: 'group-diagnostic', status: 'success', errors: [], quality_errors: [], offers: [valid],
+      groups: [{ record_type: 'group', quality_errors: ['price_unverified', 'ticket=SECRET'] }]
+    }]
+  });
+
+  assert.equal(payload.quality_status, 'warning');
+  assert.equal(payload.quality.quality_errors.includes('price_unverified'), true);
+  assert.equal(payload.quality.quality_errors.includes('execution_failed'), true);
+  assert.doesNotMatch(JSON.stringify(payload.quality.quality_errors), /SECRET|ticket/i);
+});
+
+test('root quality diagnoses malformed offers without warning on a valid member total', () => {
+  const { buildRootPayload } = require('../src/qeeq/run');
+  const valid = {
+    record_type: 'offer', provider_name: 'PUBLIC', currency: 'PLN',
+    price_tier: 'public', price_verified: true, conditional_price_verified: false,
+    total_price: 119
+  };
+  const member = {
+    record_type: 'offer', provider_name: 'MEMBER PROVIDER', currency: 'PLN',
+    price_tier: 'member', price_verified: false, conditional_price_verified: true,
+    conditional_member_total: 98
+  };
+  const rootFor = offer => buildRootPayload({
+    expected_checks: 1,
+    scenarios: [{ key: 'offer-diagnostic', status: 'success', errors: [], quality_errors: [], groups: [], offers: [valid, offer] }]
+  });
+
+  const memberPayload = rootFor(member);
+  assert.equal(memberPayload.quality_status, 'pass');
+  assert.deepEqual(memberPayload.quality.quality_errors, []);
+
+  const blankProvider = rootFor({ ...valid, provider_name: '   ' });
+  assert.equal(blankProvider.quality_status, 'warning');
+  assert.deepEqual(blankProvider.quality.quality_errors, ['provider_unresolved']);
+
+  for (const total_price of [0, -1, NaN, Infinity, undefined]) {
+    const malformed = rootFor({ ...valid, provider_name: 'MALFORMED', total_price });
+    assert.equal(malformed.quality_status, 'warning');
+    assert.deepEqual(malformed.quality.quality_errors, ['price_unverified']);
+  }
+
+  const contradictory = rootFor({
+    ...member, price_verified: true, total_price: null
+  });
+  assert.equal(contradictory.quality_status, 'warning');
+  assert.deepEqual(contradictory.quality.quality_errors, ['price_unverified']);
+
+  const foreign = rootFor({ ...valid, provider_name: 'FOREIGN', currency: 'EUR' });
+  assert.deepEqual(foreign.quality.quality_errors, ['unexpected_currency']);
+});
+
+test('merge rejects price-verified offers that fail the verified-public contract', () => {
+  const { mergePayloads } = require('../src/qeeq/mergeResults');
+  const baseOffer = {
+    record_type: 'offer', provider_name: 'PUBLIC', currency: 'PLN',
+    price_tier: 'public', price_verified: true, conditional_price_verified: false,
+    total_price: 119
+  };
+  const payloadFor = offer => ({
+    schema_version: 1, provider: 'qeeq.pl', expected_scenarios: 1, expected_checks: 1,
+    scenarios: [{
+      key: 'merge-contract', status: 'success', groups: [], offers: [offer], errors: [], quality_errors: [], artifact_refs: []
+    }],
+    errors: []
+  });
+
+  for (const offer of [
+    { ...baseOffer, total_price: 0 },
+    { ...baseOffer, total_price: -1 },
+    { ...baseOffer, total_price: null },
+    { ...baseOffer, currency: 'EUR' },
+    { ...baseOffer, price_tier: 'member', conditional_price_verified: true, conditional_member_total: 98 }
+  ]) {
+    assert.throws(
+      () => mergePayloads([{ file: 'part.json', payload: payloadFor(offer) }]),
+      /price_verified.*verified-public contract/
+    );
+  }
+});
+
+test('canonical artifact refs are bound to the deterministic scenario hash through merge', () => {
+  const crypto = require('node:crypto');
+  const { buildScenarioPayload } = require('../src/qeeq/run');
+  const { mergePayloads } = require('../src/qeeq/mergeResults');
+  const { scenarioArtifactRef } = require('../src/qeeq/utils');
+  const key = 'katowice-pyrzowice:2026-08-22:2';
+  const expectedHash = crypto.createHash('sha256').update(key).digest('hex').slice(0, 16);
+  const timestamp = '20260821T010203000Z';
+  const validRef = `failure/${expectedHash}/attempt-0/${timestamp}/error.json`;
+  const hostileRef = `failure/0000000000000000/attempt-0/${timestamp}/error.json`;
+  assert.equal(scenarioArtifactRef(key), expectedHash);
+
+  const scenario = buildScenarioPayload({
+    scenario: { key, airport: { key: 'katowice-pyrzowice', iata: 'KTW' }, rentalDays: 2 },
+    config: { artifactsDir: 'artifacts/qeeq' },
+    outcome: {
+      status: 'failure', errors: [{ code: 'scenario_failed' }], groups: [], offers: [], quality_errors: [],
+      artifacts: [`artifacts/qeeq/${validRef}`, `artifacts/qeeq/${hostileRef}`]
+    }
+  });
+  assert.deepEqual(scenario.artifact_refs, [validRef]);
+
+  const merged = mergePayloads([{
+    file: 'part.json',
+    payload: { schema_version: 1, provider: 'qeeq.pl', expected_scenarios: 1, expected_checks: 1, scenarios: [scenario], errors: [] }
+  }]);
+  assert.deepEqual(merged.scenarios[0].artifact_refs, [validRef]);
+
+  const tainted = { ...scenario, artifact_refs: [hostileRef] };
+  const hostileMerged = mergePayloads([{
+    file: 'hostile.json',
+    payload: { schema_version: 1, provider: 'qeeq.pl', expected_scenarios: 1, expected_checks: 1, scenarios: [tainted], errors: [] }
+  }]);
+  assert.deepEqual(hostileMerged.scenarios[0].artifact_refs, []);
 });

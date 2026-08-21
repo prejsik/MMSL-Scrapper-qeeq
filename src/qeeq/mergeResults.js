@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { writeCsvReport } = require('./report');
 const { buildRootPayload, canonicalArtifactRefs } = require('./run');
+const { isVerifiedPublicOffer } = require('./utils');
 
 const FORBIDDEN_NORMALIZED_FIELDS = new Set([
   'auth', 'authorization', 'businessbid', 'businessid', 'clid', 'cookie', 'cookies', 'fpt',
@@ -179,6 +180,9 @@ function normalizeOffer(offer) {
   if (typeof normalized.provider_name !== 'string' || normalized.provider_name.trim() === '') throw new Error('offer.provider_name must be a nonblank string');
   if (typeof normalized.price_verified !== 'boolean') throw new Error('offer.price_verified must be boolean');
   if (normalized.price_tier != null && !['public', 'diamond', 'member', 'conditional', 'unknown'].includes(normalized.price_tier)) throw new Error('offer.price_tier is invalid');
+  if (normalized.price_verified === true && !isVerifiedPublicOffer(normalized)) {
+    throw new Error('offer.price_verified true requires the verified-public contract');
+  }
   return normalized;
 }
 
@@ -196,7 +200,7 @@ function normalizeScenario(scenario) {
   normalized.offers = requireArray(scenario.offers, 'offers').map(normalizeOffer);
   normalized.errors = normalizeErrors(scenario.errors, key).map(error => ({ code: error.code }));
   normalized.quality_errors = normalizeQualityErrors(scenario.quality_errors);
-  normalized.artifact_refs = canonicalArtifactRefs(scenario.artifact_refs);
+  normalized.artifact_refs = canonicalArtifactRefs(scenario.artifact_refs, null, key);
   return normalized;
 }
 

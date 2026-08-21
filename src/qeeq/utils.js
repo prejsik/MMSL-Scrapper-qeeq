@@ -1,3 +1,4 @@
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -12,6 +13,13 @@ const FORBIDDEN_CSV_KEYS = new Set(['id', 'bid', 'businessid', 'businessbid', 'c
 
 function normalizedFieldName(value) {
   return String(value).toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function scenarioArtifactRef(scenarioKey) {
+  return crypto.createHash('sha256')
+    .update(String(scenarioKey || 'unknown'))
+    .digest('hex')
+    .slice(0, 16);
 }
 
 function parseAmount(value) {
@@ -169,6 +177,7 @@ module.exports = {
   normalizePriceCandidate,
   isVerifiedPublicOffer,
   rankVerifiedPublicOffers,
+  scenarioArtifactRef,
   sanitizeSourceUrl,
   sanitizeDiagnosticText,
   toCsv,

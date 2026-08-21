@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { catalogEntryForLocation } = require('./locations');
 const { loadConfig, parseCliArgs, printHelp } = require('./config');
-const { isVerifiedPublicOffer } = require('./utils');
+const { isVerifiedPublicOffer, scenarioArtifactRef } = require('./utils');
 
 const OFFER_FIELDS = [
   'vehicle_name', 'vehicle_category', 'transmission', 'seats', 'doors', 'luggage',
@@ -13,7 +13,7 @@ const OFFER_FIELDS = [
   'price_scope', 'price_verified', 'conditional_price_verified', 'parsing_source',
   'source_search_url', 'captured_at'
 ];
-const FAILURE_ARTIFACT_REF = /^failure\/[a-f0-9]{16}\/attempt-\d+\/\d{8}T\d{9}Z\/(?:browser\.log|screenshot\.png|sanitized-dom\.html|error\.json)$/;
+const FAILURE_ARTIFACT_REF = /^failure\/([a-f0-9]{16})\/attempt-\d+\/\d{8}T\d{9}Z\/(?:browser\.log|screenshot\.png|sanitized-dom\.html|error\.json)$/;
 
 function cleanCode(value) {
   return typeof value === 'string' && /^[a-z0-9_:-]+$/i.test(value) ? value : 'execution_failed';
@@ -23,15 +23,29 @@ function arrayOf(value) {
   return Array.isArray(value) ? value : [];
 }
 
-function canonicalArtifactRefs(value, artifactsDir = null) {
+function qualityErrorsForOffer(offer) {
+  if (typeof offer?.provider_name !== 'string' || !offer.provider_name.trim()) return ['provider_unresolved'];
+  if (offer.currency && offer.currency !== 'PLN') return ['unexpected_currency'];
+  if (isVerifiedPublicOffer(offer)) return [];
+  const verifiedConditional = offer.price_verified !== true
+    && ['conditional', 'diamond', 'member'].includes(offer.price_tier)
+    && offer.conditional_price_verified === true
+    && [offer.conditional_offer_total, offer.conditional_member_total]
+      .some(value => Number.isFinite(value) && value > 0);
+  return verifiedConditional ? [] : ['price_unverified'];
+}
+
+function canonicalArtifactRefs(value, artifactsDir = null, scenarioKey = null) {
   const root = typeof artifactsDir === 'string' ? artifactsDir.replace(/\\/g, '/').replace(/\/+$/, '') : null;
   if (root && (/^(?:[A-Za-z]:|\/)/.test(root) || root.split('/').includes('..'))) return [];
+  const expectedScenarioRef = scenarioArtifactRef(scenarioKey);
   const refs = arrayOf(value).flatMap(reference => {
     if (typeof reference !== 'string' || /[\u0000-\u001f\u007f?#]/.test(reference)) return [];
     const normalized = reference.replace(/\\/g, '/');
     if (/^(?:[A-Za-z]:|\/)/.test(normalized) || normalized.split('/').includes('..')) return [];
     const relative = root ? (normalized.startsWith(`${root}/`) ? normalized.slice(root.length + 1) : null) : normalized;
-    return relative && FAILURE_ARTIFACT_REF.test(relative) ? [relative] : [];
+    const match = relative && FAILURE_ARTIFACT_REF.exec(relative);
+    return match && match[1] === expectedScenarioRef ? [relative] : [];
   });
   return [...new Set(refs)].sort();
 }
@@ -55,6 +69,7 @@ function buildScenarioPayload(input = {}) {
   const scenario = input.scenario || {};
   const outcome = input.outcome || {};
   const airport = scenario.airport || {};
+  const key = scenario.key || outcome.key || null;
   const offers = arrayOf(outcome.offers)
     .filter(offer => offer?.record_type === 'offer')
     .map(offer => ({
@@ -67,7 +82,7 @@ function buildScenarioPayload(input = {}) {
   const failed = outcome.status === 'failure' || Boolean(outcome.error_code) || errors.length > 0;
   if (failed && errors.length === 0) errors.push({ code: cleanCode(outcome.error_code) });
   return {
-    key: scenario.key || outcome.key || null,
+    key,
     status: failed ? 'failure' : 'success',
     requested_city: airport.city ?? null,
     airport_key: airport.key ?? null,
@@ -89,7 +104,7 @@ function buildScenarioPayload(input = {}) {
     offers,
     errors,
     quality_errors: qualityErrors,
-    artifact_refs: canonicalArtifactRefs(outcome.artifacts, input.config?.artifactsDir)
+    artifact_refs: canonicalArtifactRefs(outcome.artifacts, input.config?.artifactsDir, key)
   };
 }
 
@@ -137,12 +152,10 @@ function buildRootPayload(input = {}) {
   const unverified = scenarios.flatMap(scenario => arrayOf(scenario.offers)).length - verified;
   const qualityErrors = [...new Set([
     ...scenarios.flatMap(scenario => arrayOf(scenario.quality_errors)),
-    ...scenarios.flatMap(scenario => arrayOf(scenario.offers).flatMap(offer => {
-      if (offer.currency && offer.currency !== 'PLN') return ['unexpected_currency'];
-      return offer.price_verified === true || offer.conditional_price_verified === true ? [] : ['price_unverified'];
-    })),
+    ...scenarios.flatMap(scenario => arrayOf(scenario.groups).flatMap(group => arrayOf(group?.quality_errors))),
+    ...scenarios.flatMap(scenario => arrayOf(scenario.offers).flatMap(qualityErrorsForOffer)),
     ...scenarios.filter(scenario => scenario.status === 'success' && arrayOf(scenario.offers).length === 0).map(() => 'empty_result')
-  ])];
+  ].map(cleanCode))].sort();
   const errors = scenarios.flatMap(scenario => arrayOf(scenario.errors).map(error => ({
     code: cleanCode(error.code), scenario_key: scenario.key
   })));

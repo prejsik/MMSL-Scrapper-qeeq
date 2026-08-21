@@ -2,7 +2,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { sanitizeDiagnosticText } = require('./utils');
+const { sanitizeDiagnosticText, scenarioArtifactRef } = require('./utils');
 
 const MAX_EVENTS = 50;
 const MAX_EVENTS_PER_KIND = 25;
@@ -131,7 +131,7 @@ function createFailureArtifactSession(config = {}, scenario = {}, attempt = 0, n
       const activePage = page;
       dispose();
       const root = safeArtifactRoot(config.artifactsDir);
-      const scenarioRef = crypto.createHash('sha256').update(String(scenario?.key || 'unknown')).digest('hex').slice(0, 16);
+      const scenarioRef = scenarioArtifactRef(scenario?.key);
       const capturedAt = new Date(now()).toISOString();
       const timestamp = capturedAt.replace(/[-:.]/g, '');
       const directory = path.join(root, 'failure', scenarioRef, `attempt-${Number(attempt) || 0}`, timestamp);
