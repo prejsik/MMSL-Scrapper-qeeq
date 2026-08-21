@@ -1,0 +1,9 @@
+{
+  "approved": false,
+  "minMultiplier": 1,
+  "maxMultiplier": 1.2,
+  "defaultMultiplier": null,
+  "airportMultipliers": {},
+  "durationMultipliers": {},
+  "airportDurationMultipliers": {}
+}

@@ -4221,3 +4221,217 @@ test('MM availability separates present confirmed missing and incomplete dates',
   assert.match(buildMmAvailabilityAlert(payload), /Brak MM - pelne dane\n- 2026-09-02/);
   assert.match(buildMmAvailabilityAlert(payload), /Nie mozna potwierdzic - niepelne dane\n- 2026-09-03/);
 });
+
+function pricingOffer(provider_name, dailyRate, rentalDays = 2) {
+  return {
+    record_type: 'offer', provider_name, vehicle_name: `${provider_name} car`,
+    total_price: dailyRate * rentalDays, daily_price: dailyRate,
+    currency: 'PLN', price_tier: 'public', price_verified: true
+  };
+}
+
+function pricingScenario({
+  key = 'katowice-pyrzowice:2026-09-10:2', airportKey = 'katowice-pyrzowice', iata = 'KTW',
+  pickupDate = '2026-09-10', rentalDays = 2, status = 'success', offers = []
+} = {}) {
+  return {
+    key, status, airport_key: airportKey, iata, pickup_at: `${pickupDate}T10:00:00`,
+    dropoff_at: `${pickupDate}T10:00:00`, rental_days: rentalDays, offers
+  };
+}
+
+function pricingFixtureRankTwo() {
+  return {
+    schema_version: 1,
+    provider: 'qeeq.pl',
+    options: {
+      start_dates: ['2026-09-10'], airport_keys: ['katowice-pyrzowice'], durations_days: [2]
+    },
+    scenarios: [pricingScenario({ offers: [
+      pricingOffer('Ace', 100), pricingOffer('MM Cars Rental', 105), pricingOffer('Alamo', 115)
+    ] })]
+  };
+}
+
+test('QEEQ tariff mapping leaves WMI under review and maps the other airports', () => {
+  const { locationCatalog } = require('../src/qeeq/locations');
+  const byIata = new Map(locationCatalog.flatMap(city => city.airports).map(item => [item.iata, item.tariffZones]));
+  assert.deepEqual(byIata.get('WMI'), []);
+  assert.deepEqual(byIata.get('KTW'), ['KALO']);
+  assert.deepEqual(byIata.get('KRK'), ['KRLO', 'KRTI']);
+});
+
+test('pricing emits a site target but no import rate without approved QEEQ calibration', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const result = buildPricingRecommendations(pricingFixtureRankTwo(), { calibration: { approved: false } });
+  assert.equal(result.decisions[0].site_action, 'decrease');
+  assert.equal(result.decisions[0].site_target_rate_pln_day, 99);
+  assert.equal(result.decisions[0].import_action, 'review');
+  assert.equal(result.decisions[0].suggested_rate_pln_day, null);
+  assert.equal(result.decisions[0].calibration_status, 'unapproved');
+});
+
+test('pricing converts an authorized QEEQ site target with the approved multiplier', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const calibration = { approved: true, minMultiplier: 1, maxMultiplier: 1.2,
+    airportDurationMultipliers: { 'katowice-pyrzowice|2': 1.1 } };
+  const payload = pricingFixtureRankTwo();
+  payload.scenarios[0].offers.forEach(offer => { offer.daily_price = 1; });
+  const decision = buildPricingRecommendations(payload, { calibration }).decisions[0];
+  assert.equal(decision.calibration_status, 'approved');
+  assert.equal(decision.suggested_rate_pln_day, 90);
+  assert.equal(decision.import_action, 'decrease');
+});
+
+test('pricing raises rank-one MM toward the second provider', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const payload = pricingFixtureRankTwo();
+  payload.scenarios[0].offers = [pricingOffer('MM Cars Rental', 80), pricingOffer('Ace', 100)];
+  const decision = buildPricingRecommendations(payload, { calibration: { approved: false } }).decisions[0];
+  assert.equal(decision.mm_provider_rank, 1);
+  assert.equal(decision.site_action, 'increase');
+  assert.equal(decision.site_target_rate_pln_day, 99);
+});
+
+test('pricing makes a small decrease for MM outside Top 3', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const payload = pricingFixtureRankTwo();
+  payload.scenarios[0].offers = [
+    pricingOffer('Ace', 80), pricingOffer('Alamo', 90), pricingOffer('Europcar', 100),
+    pricingOffer('MM Cars Rental', 105)
+  ];
+  const decision = buildPricingRecommendations(payload, { calibration: { approved: false } }).decisions[0];
+  assert.equal(decision.mm_provider_rank, 4);
+  assert.equal(decision.benchmark_provider_name, 'Europcar');
+  assert.equal(decision.site_action, 'decrease');
+  assert.equal(decision.site_target_rate_pln_day, 99);
+});
+
+test('pricing reviews missing MM and incomplete public evidence', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const missing = pricingFixtureRankTwo();
+  missing.scenarios[0].offers = [pricingOffer('Ace', 100), pricingOffer('Alamo', 110)];
+  const missingDecision = buildPricingRecommendations(missing, { calibration: { approved: false } }).decisions[0];
+  assert.equal(missingDecision.site_action, 'review');
+  assert.equal(missingDecision.reason, 'mm_not_visible');
+
+  const incomplete = pricingFixtureRankTwo();
+  incomplete.options.airport_keys.push('krakow-balice');
+  const incompleteDecision = buildPricingRecommendations(incomplete, { calibration: { approved: false } }).decisions[0];
+  assert.equal(incompleteDecision.site_action, 'review');
+  assert.equal(incompleteDecision.data_quality_status, 'incomplete');
+  assert.equal(incompleteDecision.suggested_rate_pln_day, null);
+});
+
+test('pricing holds durations above seven days', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const payload = pricingFixtureRankTwo();
+  payload.options.durations_days = [8];
+  payload.scenarios = [pricingScenario({
+    key: 'katowice-pyrzowice:2026-09-10:8', rentalDays: 8,
+    offers: [pricingOffer('Ace', 100, 8), pricingOffer('MM Cars Rental', 105, 8)]
+  })];
+  const decision = buildPricingRecommendations(payload, { calibration: { approved: false } }).decisions[0];
+  assert.equal(decision.site_action, 'hold');
+  assert.equal(decision.reason, 'duration_above_recommendation_limit');
+  assert.equal(decision.import_action, 'hold');
+});
+
+test('pricing keeps WMI import under review and holds sub-minimum changes', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const payload = pricingFixtureRankTwo();
+  payload.options.airport_keys = ['warsaw-modlin'];
+  payload.scenarios = [pricingScenario({
+    key: 'warsaw-modlin:2026-09-10:2', airportKey: 'warsaw-modlin', iata: 'WMI',
+    offers: [pricingOffer('Ace', 100), pricingOffer('MM Cars Rental', 105)]
+  })];
+  const calibration = { approved: true, minMultiplier: 1, maxMultiplier: 1.2, defaultMultiplier: 1.1 };
+  const unmapped = buildPricingRecommendations(payload, { calibration }).decisions[0];
+  assert.equal(unmapped.site_action, 'decrease');
+  assert.equal(unmapped.data_quality_status, 'unmapped_tariff_zone');
+  assert.equal(unmapped.import_action, 'review');
+  assert.equal(unmapped.suggested_rate_pln_day, null);
+
+  const smallChange = pricingFixtureRankTwo();
+  smallChange.scenarios[0].offers = [pricingOffer('Ace', 100), pricingOffer('MM Cars Rental', 100.2)];
+  const held = buildPricingRecommendations(smallChange, {
+    calibration: { approved: false }, rules: { minChangePlnDay: 1.5 }
+  }).decisions[0];
+  assert.equal(held.site_action, 'hold');
+  assert.equal(held.reason, 'change_below_minimum');
+});
+
+test('calibration uses priority order and rejects an invalid approved multiplier', () => {
+  const { resolveApprovedMultiplier } = require('../src/qeeq/pricingRecommendations');
+  const calibration = {
+    approved: true, minMultiplier: 1, maxMultiplier: 1.2, defaultMultiplier: 1.01,
+    durationMultipliers: { '2': 1.02 }, airportMultipliers: { 'katowice-pyrzowice': 1.03 },
+    airportDurationMultipliers: { 'katowice-pyrzowice|2': 1.04 }
+  };
+  assert.deepEqual(resolveApprovedMultiplier(calibration, 'katowice-pyrzowice', 2), {
+    status: 'approved', multiplier: 1.04, source: 'airport_duration'
+  });
+  assert.deepEqual(resolveApprovedMultiplier({ ...calibration, airportDurationMultipliers: {}, airportMultipliers: {}, durationMultipliers: {}, defaultMultiplier: null }, 'katowice-pyrzowice', 2), {
+    status: 'uncovered', multiplier: null, source: null
+  });
+  assert.throws(
+    () => resolveApprovedMultiplier({ ...calibration, airportDurationMultipliers: { 'katowice-pyrzowice|2': 1.3 } }, 'katowice-pyrzowice', 2),
+    /QEEQ calibration multiplier is invalid or outside the approved range/
+  );
+});
+
+test('pricing recommendation order and counts are deterministic', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const payload = pricingFixtureRankTwo();
+  payload.options.start_dates = ['2026-09-10', '2026-09-09'];
+  payload.scenarios = [
+    payload.scenarios[0],
+    pricingScenario({
+      key: 'katowice-pyrzowice:2026-09-09:2', pickupDate: '2026-09-09',
+      offers: [pricingOffer('Ace', 100), pricingOffer('MM Cars Rental', 105)]
+    })
+  ];
+  const options = { calibration: { approved: false } };
+  const first = buildPricingRecommendations(payload, options);
+  const second = buildPricingRecommendations({ ...payload, scenarios: [...payload.scenarios].reverse() }, options);
+  assert.deepEqual(first, second);
+  assert.deepEqual(first.decisions.map(item => item.pickup_date), ['2026-09-09', '2026-09-10']);
+  assert.deepEqual(first.counts, {
+    decision_count: 2, site_recommendation_count: 2, import_recommendation_count: 0,
+    increase_count: 0, decrease_count: 2, hold_count: 0, review_count: 0
+  });
+});
+
+test('pricing CLI validates inputs and writes recommendations atomically', t => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { buildPricingRecommendations, main } = require('../src/qeeq/pricingRecommendations');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-pricing-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const input = path.join(directory, 'input.json');
+  const config = path.join(directory, 'rules.json');
+  const calibration = path.join(directory, 'calibration.json');
+  const output = path.join(directory, 'output.json');
+  fs.writeFileSync(input, JSON.stringify(pricingFixtureRankTwo()));
+  fs.writeFileSync(config, JSON.stringify({ pricing: { top1GapThresholdPlnDay: 10 } }));
+  fs.writeFileSync(calibration, JSON.stringify({ approved: false }));
+
+  assert.throws(() => main([input, output, `--config=${config}`, `--calibration=${calibration}`, '--bogus=yes']), /Unknown option/);
+  assert.equal(fs.existsSync(output), false);
+  assert.throws(() => main([input, input, `--config=${config}`, `--calibration=${calibration}`]), /cannot overwrite/);
+  assert.throws(() => main([input, output, `--config=${directory}`, `--calibration=${calibration}`]), /regular file/);
+  assert.equal(fs.existsSync(output), false);
+  fs.writeFileSync(config, JSON.stringify({ pricing: { minChangePlnDay: null } }));
+  assert.throws(() => main([input, output, `--config=${config}`, `--calibration=${calibration}`]), /must be finite/);
+  assert.equal(fs.existsSync(output), false);
+  fs.writeFileSync(config, JSON.stringify({ pricing: {} }));
+  fs.writeFileSync(input, JSON.stringify({ provider: 'qeeq.pl', scenarios: [] }));
+  assert.throws(() => main([input, output, `--config=${config}`, `--calibration=${calibration}`]), /Malformed canonical/);
+  assert.equal(fs.existsSync(output), false);
+
+  fs.writeFileSync(input, JSON.stringify(pricingFixtureRankTwo()));
+  assert.equal(main([input, output, `--config=${config}`, `--calibration=${calibration}`]), 0);
+  assert.deepEqual(JSON.parse(fs.readFileSync(output, 'utf8')),
+    buildPricingRecommendations(pricingFixtureRankTwo(), { rules: {}, calibration: { approved: false } }));
+});
