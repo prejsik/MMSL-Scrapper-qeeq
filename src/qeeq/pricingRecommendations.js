@@ -39,7 +39,10 @@ function resolveApprovedMultiplier(calibration, airportKey, rentalDays) {
   const max = Number(calibration.maxMultiplier);
   if (!Number.isFinite(multiplier) || !Number.isFinite(min) || !Number.isFinite(max)
       || multiplier <= 0 || min <= 0 || max < min || multiplier < min || multiplier > max) {
-    throw new Error('QEEQ calibration multiplier is invalid or outside the approved range');
+    return {
+      status: 'invalid', multiplier: null, source: selected[0],
+      reason: 'invalid_or_outside_approved_range'
+    };
   }
   return { status: 'approved', multiplier, source: selected[0] };
 }
@@ -75,6 +78,70 @@ function scenarioIdentity(scenario) {
     throw new Error('Malformed canonical QEEQ scenario');
   }
   return { pickupDate, airportKey: scenario.airport_key, rentalDays: scenario.rental_days };
+}
+
+function validDateOnly(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
+}
+
+function canonicalList(value, label, validate) {
+  if (!Array.isArray(value) || value.length === 0 || value.some(item => !validate(item))
+      || new Set(value).size !== value.length) {
+    throw new Error(`Malformed canonical QEEQ options: ${label}`);
+  }
+  return new Set(value);
+}
+
+function validateCanonicalPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+      || payload.schema_version !== 1 || payload.provider !== 'qeeq.pl'
+      || !Array.isArray(payload.scenarios)
+      || !payload.options || typeof payload.options !== 'object' || Array.isArray(payload.options)) {
+    throw new Error('Malformed canonical QEEQ input');
+  }
+  const dates = canonicalList(payload.options.start_dates, 'start_dates', validDateOnly);
+  const airports = canonicalList(payload.options.airport_keys, 'airport_keys',
+    value => typeof value === 'string' && /^[A-Za-z0-9._-]+$/.test(value));
+  const durations = canonicalList(payload.options.durations_days, 'durations_days',
+    value => Number.isInteger(value) && value > 0);
+  const requestedCount = dates.size * airports.size * durations.size;
+  for (const field of ['expected_scenarios', 'expected_checks']) {
+    if (payload[field] != null
+        && (!Number.isInteger(payload[field]) || payload[field] !== requestedCount)) {
+      throw new Error(`Malformed canonical QEEQ input: ${field}`);
+    }
+  }
+  if (payload.expected_scenarios != null && payload.expected_checks != null
+      && payload.expected_scenarios !== payload.expected_checks) {
+    throw new Error('Malformed canonical QEEQ input: incompatible expected counts');
+  }
+
+  const keys = new Set();
+  for (const scenario of payload.scenarios) {
+    if (!scenario || typeof scenario !== 'object' || Array.isArray(scenario)
+        || !['success', 'failure'].includes(scenario.status)
+        || !Array.isArray(scenario.offers)
+        || typeof scenario.airport_key !== 'string' || !/^[A-Za-z0-9._-]+$/.test(scenario.airport_key)
+        || !Number.isInteger(scenario.rental_days) || scenario.rental_days <= 0
+        || typeof scenario.pickup_at !== 'string') {
+      throw new Error('Malformed canonical QEEQ scenario');
+    }
+    const pickupDate = scenario.pickup_at.slice(0, 10);
+    if (!validDateOnly(pickupDate)
+        || !dates.has(pickupDate)
+        || !airports.has(scenario.airport_key)
+        || !durations.has(scenario.rental_days)) {
+      throw new Error(`Malformed canonical QEEQ scenario matrix: ${scenario.key ?? 'unknown'}`);
+    }
+    const expectedKey = `${scenario.airport_key}:${pickupDate}:${scenario.rental_days}`;
+    if (scenario.key !== expectedKey || keys.has(scenario.key)) {
+      throw new Error(`Malformed canonical QEEQ scenario key: ${scenario.key ?? 'unknown'}`);
+    }
+    keys.add(scenario.key);
+  }
 }
 
 function providerSummary(offer, rentalDays, increment) {
@@ -179,6 +246,7 @@ function buildDecision(scenario, dateAvailability, options, rules) {
     calibration_status: calibration.status,
     calibration_source: calibration.source,
     calibration_multiplier: calibration.multiplier,
+    calibration_reason: calibration.reason ?? null,
     import_action: importAction,
     suggested_rate_pln_day: suggestedRate,
     data_quality_status: dataQualityStatus,
@@ -187,11 +255,7 @@ function buildDecision(scenario, dateAvailability, options, rules) {
 }
 
 function buildPricingRecommendations(payload, options = {}) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
-      || payload.schema_version !== 1 || payload.provider !== 'qeeq.pl'
-      || !Array.isArray(payload.scenarios)) {
-    throw new Error('Malformed canonical QEEQ input');
-  }
+  validateCanonicalPayload(payload);
   const rules = pricingRules(options);
   const availability = classifyMmAvailability(payload);
   const byDate = new Map(availability.dates.map(item => [item.pickup_date, item]));

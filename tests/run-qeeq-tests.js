@@ -4361,8 +4361,8 @@ test('pricing keeps WMI import under review and holds sub-minimum changes', () =
   assert.equal(held.reason, 'change_below_minimum');
 });
 
-test('calibration uses priority order and rejects an invalid approved multiplier', () => {
-  const { resolveApprovedMultiplier } = require('../src/qeeq/pricingRecommendations');
+test('calibration uses priority order and marks an invalid approved multiplier for review', () => {
+  const { buildPricingRecommendations, resolveApprovedMultiplier } = require('../src/qeeq/pricingRecommendations');
   const calibration = {
     approved: true, minMultiplier: 1, maxMultiplier: 1.2, defaultMultiplier: 1.01,
     durationMultipliers: { '2': 1.02 }, airportMultipliers: { 'katowice-pyrzowice': 1.03 },
@@ -4374,10 +4374,72 @@ test('calibration uses priority order and rejects an invalid approved multiplier
   assert.deepEqual(resolveApprovedMultiplier({ ...calibration, airportDurationMultipliers: {}, airportMultipliers: {}, durationMultipliers: {}, defaultMultiplier: null }, 'katowice-pyrzowice', 2), {
     status: 'uncovered', multiplier: null, source: null
   });
-  assert.throws(
-    () => resolveApprovedMultiplier({ ...calibration, airportDurationMultipliers: { 'katowice-pyrzowice|2': 1.3 } }, 'katowice-pyrzowice', 2),
-    /QEEQ calibration multiplier is invalid or outside the approved range/
-  );
+  const invalidCalibration = { ...calibration, airportDurationMultipliers: { 'katowice-pyrzowice|2': 1.3 } };
+  assert.deepEqual(resolveApprovedMultiplier(invalidCalibration, 'katowice-pyrzowice', 2), {
+    status: 'invalid', multiplier: null, source: 'airport_duration', reason: 'invalid_or_outside_approved_range'
+  });
+  const decision = buildPricingRecommendations(pricingFixtureRankTwo(), { calibration: invalidCalibration }).decisions[0];
+  assert.equal(decision.site_action, 'decrease');
+  assert.equal(decision.site_target_rate_pln_day, 99);
+  assert.equal(decision.calibration_status, 'invalid');
+  assert.equal(decision.calibration_reason, 'invalid_or_outside_approved_range');
+  assert.equal(decision.import_action, 'review');
+  assert.equal(decision.suggested_rate_pln_day, null);
+});
+
+test('pricing rejects malformed canonical option matrices and scenario tuples', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const malformed = [];
+  const duplicateDate = pricingFixtureRankTwo();
+  duplicateDate.options.start_dates.push('2026-09-10');
+  malformed.push(duplicateDate);
+  const duplicateAirport = pricingFixtureRankTwo();
+  duplicateAirport.options.airport_keys.push('katowice-pyrzowice');
+  malformed.push(duplicateAirport);
+  const invalidOptions = pricingFixtureRankTwo();
+  invalidOptions.options.durations_days = '2';
+  malformed.push(invalidOptions);
+  const mismatchedKey = pricingFixtureRankTwo();
+  mismatchedKey.scenarios[0].key = 'katowice-pyrzowice:2026-09-11:2';
+  malformed.push(mismatchedKey);
+  const outsideMatrix = pricingFixtureRankTwo();
+  outsideMatrix.scenarios[0].airport_key = 'krakow-balice';
+  outsideMatrix.scenarios[0].key = 'krakow-balice:2026-09-10:2';
+  malformed.push(outsideMatrix);
+  const duplicateScenario = pricingFixtureRankTwo();
+  duplicateScenario.scenarios.push({ ...duplicateScenario.scenarios[0], offers: [...duplicateScenario.scenarios[0].offers] });
+  malformed.push(duplicateScenario);
+  const invalidStatus = pricingFixtureRankTwo();
+  invalidStatus.scenarios[0].status = 'warning';
+  malformed.push(invalidStatus);
+  const invalidShape = pricingFixtureRankTwo();
+  invalidShape.scenarios[0].offers = {};
+  malformed.push(invalidShape);
+
+  for (const payload of malformed) {
+    assert.throws(() => buildPricingRecommendations(payload, { calibration: { approved: false } }), /Malformed canonical QEEQ/);
+  }
+});
+
+test('pricing CLI leaves no output for a malformed canonical matrix', t => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { main } = require('../src/qeeq/pricingRecommendations');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-pricing-invalid-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const input = path.join(directory, 'input.json');
+  const config = path.join(directory, 'rules.json');
+  const calibration = path.join(directory, 'calibration.json');
+  const output = path.join(directory, 'output.json');
+  const payload = pricingFixtureRankTwo();
+  payload.options.start_dates.push('2026-09-10');
+  fs.writeFileSync(input, JSON.stringify(payload));
+  fs.writeFileSync(config, JSON.stringify({ pricing: {} }));
+  fs.writeFileSync(calibration, JSON.stringify({ approved: false }));
+
+  assert.throws(() => main([input, output, `--config=${config}`, `--calibration=${calibration}`]), /Malformed canonical QEEQ/);
+  assert.equal(fs.existsSync(output), false);
 });
 
 test('pricing recommendation order and counts are deterministic', () => {
