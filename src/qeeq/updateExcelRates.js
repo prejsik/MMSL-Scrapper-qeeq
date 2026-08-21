@@ -136,6 +136,16 @@ function summaryFromPayload(payload) {
   };
 }
 
+function invalidateFormulaCaches(sheet) {
+  sheet.eachRow({ includeEmpty: false }, row => {
+    row.eachCell({ includeEmpty: false }, cell => {
+      if (!cell.formula) return;
+      const { result, ...formulaValue } = cell.value;
+      cell.value = formulaValue;
+    });
+  });
+}
+
 function applyRecommendationsToWorkbook(workbook, payload, suppliedConfig) {
   const config = validateConfig(suppliedConfig);
   validateRecommendationPayload(payload);
@@ -200,6 +210,10 @@ function applyRecommendationsToWorkbook(workbook, payload, suppliedConfig) {
     });
   }
   summary.applied_count = operations.length;
+  if (operations.length > 0) {
+    invalidateFormulaCaches(sheet);
+    workbook.calcProperties.fullCalcOnLoad = true;
+  }
   for (const other of workbook.worksheets.filter(item => item.name !== config.worksheet)) {
     workbook.removeWorksheet(other.id);
   }

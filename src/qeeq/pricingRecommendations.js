@@ -223,19 +223,30 @@ function buildDecision(scenario, dateAvailability, options, rules) {
   }
   if (site.target !== null) {
     site.target = roundToIncrement(site.target, rules.roundingIncrementPlnDay);
-    const change = site.target - mmRate;
-    if ((site.action === 'increase' && change < rules.minChangePlnDay)
+    if (!Number.isFinite(site.target) || site.target <= 0) {
+      site = { ...site, action: 'review', target: null, reason: 'invalid_site_target_rate' };
+    } else {
+      const change = site.target - mmRate;
+      if ((site.action === 'increase' && change < rules.minChangePlnDay)
         || (site.action === 'decrease' && -change < rules.minChangePlnDay)) {
-      site = { ...site, action: 'hold', target: null, reason: 'change_below_minimum' };
+        site = { ...site, action: 'hold', target: null, reason: 'change_below_minimum' };
+      }
     }
   }
 
   let importAction = site.action;
   let suggestedRate = null;
+  let calibrationReason = calibration.reason ?? null;
   if (site.action === 'increase' || site.action === 'decrease') {
     if (calibration.status === 'approved' && dataQualityStatus === 'complete') {
-      importAction = site.action;
-      suggestedRate = roundToIncrement(site.target / calibration.multiplier, rules.roundingIncrementPlnDay);
+      const calibratedRate = roundToIncrement(site.target / calibration.multiplier, rules.roundingIncrementPlnDay);
+      if (Number.isFinite(calibratedRate) && calibratedRate > 0) {
+        importAction = site.action;
+        suggestedRate = calibratedRate;
+      } else {
+        importAction = 'review';
+        calibrationReason = 'invalid_calibrated_suggested_rate';
+      }
     } else {
       importAction = 'review';
     }
@@ -264,7 +275,7 @@ function buildDecision(scenario, dateAvailability, options, rules) {
     calibration_status: calibration.status,
     calibration_source: calibration.source,
     calibration_multiplier: calibration.multiplier,
-    calibration_reason: calibration.reason ?? null,
+    calibration_reason: calibrationReason,
     import_action: importAction,
     suggested_rate_pln_day: suggestedRate,
     data_quality_status: dataQualityStatus,

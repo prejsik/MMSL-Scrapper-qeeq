@@ -4330,6 +4330,55 @@ test('MM availability separates present confirmed missing and incomplete dates',
   assert.match(buildMmAvailabilityAlert(payload), /Nie mozna potwierdzic - niepelne dane\n- 2026-09-03/);
 });
 
+test('MM availability treats duplicate scenario tuples as incomplete evidence', () => {
+  const { classifyMmAvailability } = require('../src/qeeq/mmAvailability');
+  const offer = provider_name => ({
+    record_type: 'offer', provider_name, total_price: 200, daily_price: 100,
+    currency: 'PLN', price_tier: 'public', price_verified: true
+  });
+  const scenario = {
+    key: 'ktw:2026-09-04:2', airport_key: 'ktw', rental_days: 2, status: 'success',
+    pickup_at: '2026-09-04T10:00:00', offers: [offer('Ace')]
+  };
+  const result = classifyMmAvailability({
+    options: { start_dates: ['2026-09-04'], airport_keys: ['ktw'], durations_days: [2] },
+    scenarios: [scenario, { ...scenario, key: 'duplicate' }]
+  });
+  assert.deepEqual(result.dates.map(item => [item.status, item.completed_checks, item.failed_checks]), [
+    ['incomplete', 0, 1]
+  ]);
+});
+
+test('MM availability requires a verified public offer for complete evidence', () => {
+  const { classifyMmAvailability } = require('../src/qeeq/mmAvailability');
+  const result = classifyMmAvailability({
+    options: { start_dates: ['2026-09-05'], airport_keys: ['ktw'], durations_days: [2] },
+    scenarios: [{
+      key: 'ktw:2026-09-05:2', airport_key: 'ktw', rental_days: 2, status: 'success',
+      pickup_at: '2026-09-05T10:00:00', offers: [{
+        record_type: 'offer', provider_name: 'Ace', total_price: null, daily_price: null,
+        currency: 'PLN', price_tier: 'unknown', price_verified: false
+      }]
+    }]
+  });
+  assert.deepEqual(result.dates.map(item => item.status), ['incomplete']);
+});
+
+test('MM availability does not treat an unverified MM offer as present', () => {
+  const { classifyMmAvailability } = require('../src/qeeq/mmAvailability');
+  const result = classifyMmAvailability({
+    options: { start_dates: ['2026-09-06'], airport_keys: ['ktw'], durations_days: [2] },
+    scenarios: [{
+      key: 'ktw:2026-09-06:2', airport_key: 'ktw', rental_days: 2, status: 'success',
+      pickup_at: '2026-09-06T10:00:00', offers: [
+        pricingOffer('Ace', 100),
+        { ...pricingOffer('MM Cars Rental', 90), total_price: null, daily_price: null, price_verified: false }
+      ]
+    }]
+  });
+  assert.deepEqual(result.dates.map(item => item.status), ['confirmed_missing']);
+});
+
 function pricingOffer(provider_name, dailyRate, rentalDays = 2) {
   return {
     record_type: 'offer', provider_name, vehicle_name: `${provider_name} car`,
@@ -4389,6 +4438,41 @@ test('pricing converts an authorized QEEQ site target with the approved multipli
   assert.equal(decision.calibration_status, 'approved');
   assert.equal(decision.suggested_rate_pln_day, 90);
   assert.equal(decision.import_action, 'decrease');
+});
+
+test('pricing reviews a non-positive site target produced by an extreme buffer', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const payload = pricingFixtureRankTwo();
+  payload.scenarios[0].offers = [pricingOffer('Ace', 1), pricingOffer('MM Cars Rental', 2)];
+  const calibration = { approved: true, minMultiplier: 1, maxMultiplier: 2, defaultMultiplier: 1 };
+  const result = buildPricingRecommendations(payload, {
+    calibration,
+    rules: { undercutBufferPlnDay: 2, top1UndercutThresholdPlnDay: 10 }
+  });
+  const decision = result.decisions[0];
+  assert.equal(decision.site_action, 'review');
+  assert.equal(decision.site_target_rate_pln_day, null);
+  assert.equal(decision.import_action, 'review');
+  assert.equal(decision.suggested_rate_pln_day, null);
+  assert.equal(decision.reason, 'invalid_site_target_rate');
+  assert.equal(result.site_recommendations.length, 0);
+  assert.equal(result.import_recommendations.length, 0);
+});
+
+test('pricing reviews a calibrated rate that rounds to zero for a low benchmark', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const payload = pricingFixtureRankTwo();
+  payload.scenarios[0].offers = [pricingOffer('Ace', 0.01), pricingOffer('MM Cars Rental', 0.02)];
+  const calibration = { approved: true, minMultiplier: 1, maxMultiplier: 10, defaultMultiplier: 10 };
+  const decision = buildPricingRecommendations(payload, {
+    calibration,
+    rules: { undercutBufferPlnDay: 0, top1UndercutThresholdPlnDay: 10, minChangePlnDay: 0 }
+  }).decisions[0];
+  assert.equal(decision.site_action, 'decrease');
+  assert.equal(decision.site_target_rate_pln_day, 0.01);
+  assert.equal(decision.import_action, 'review');
+  assert.equal(decision.suggested_rate_pln_day, null);
+  assert.equal(decision.calibration_reason, 'invalid_calibrated_suggested_rate');
 });
 
 test('pricing raises rank-one MM toward the second provider', () => {
@@ -4662,6 +4746,8 @@ async function createSyntheticQeeqTariffFixture() {
     values.forEach((value, column) => { sheet.getRow(index + 5).getCell(column + 1).value = value; });
   });
   sheet.getCell('K5').value = { formula: 'I5+J5', result: 150 };
+  sheet.getCell('K5').font = { italic: true, color: { argb: 'FF654321' } };
+  sheet.getCell('K5').numFmt = '0.0';
   sheet.getCell('I5').style = {
     font: { bold: true, color: { argb: 'FF123456' } },
     fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFF00' } },
@@ -4672,6 +4758,9 @@ async function createSyntheticQeeqTariffFixture() {
   sheet.getColumn(1).width = 14;
   sheet.getColumn(9).width = 18;
   sheet.getRow(5).height = 25;
+  sheet.views = [{ state: 'frozen', xSplit: 1, ySplit: 4, topLeftCell: 'B5', activeCell: 'I5' }];
+  sheet.autoFilter = 'A4:K9';
+  sheet.pageSetup = { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, paperSize: 9 };
   await workbook.xlsx.writeFile(baselinePath);
   const decisions = [
     {
@@ -4826,6 +4915,41 @@ test('Excel updater preserves formulas, styles, dimensions, and merged cells', a
   assert.equal(sheet.getRow(5).height, 25);
   assert.equal(sheet.getCell('A1').isMerged, true);
   assert.equal(sheet.getCell('C1').master.address, 'A1');
+  assert.equal(sheet.views[0].state, 'frozen');
+  assert.equal(sheet.views[0].xSplit, 1);
+  assert.equal(sheet.views[0].ySplit, 4);
+  assert.equal(sheet.autoFilter, 'A4:K9');
+  assert.equal(sheet.pageSetup.orientation, 'landscape');
+  assert.equal(sheet.pageSetup.fitToPage, true);
+  assert.equal(sheet.pageSetup.fitToWidth, 1);
+  assert.equal(sheet.pageSetup.fitToHeight, 0);
+});
+
+test('Excel updater requests full recalculation and clears stale formula results after a rate edit', async t => {
+  const fs = require('node:fs');
+  const JSZip = require('jszip');
+  const ExcelJS = require('exceljs');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  await generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+  });
+
+  const output = new ExcelJS.Workbook();
+  await output.xlsx.readFile(fixture.outputPath);
+  const formulaCell = output.getWorksheet('Sheet1').getCell('K5');
+  assert.equal(formulaCell.formula, 'I5+J5');
+  assert.equal(formulaCell.result, undefined);
+  assert.deepEqual(formulaCell.font, { italic: true, color: { argb: 'FF654321' } });
+  assert.equal(formulaCell.numFmt, '0.0');
+
+  const archive = await JSZip.loadAsync(fs.readFileSync(fixture.outputPath));
+  const workbookXml = await archive.file('xl/workbook.xml').async('string');
+  const sheetXml = await archive.file('xl/worksheets/sheet1.xml').async('string');
+  assert.match(workbookXml, /<calcPr\b[^>]*\bfullCalcOnLoad="1"/);
+  assert.match(sheetXml, /<c r="K5"[^>]*><f>I5\+J5<\/f><\/c>/);
 });
 
 test('Excel updater rejects path collisions and invalid active recommendations before output', async t => {
@@ -4948,4 +5072,28 @@ test('Excel updater atomic rename failure preserves an existing output and remov
   assert.equal(fs.readFileSync(fixture.outputPath, 'utf8'), 'existing valid output');
   assert.equal(fs.existsSync(fixture.summaryPath), false);
   assert.deepEqual(fs.readdirSync(fixture.directory).filter(name => name.includes('.tmp')), []);
+});
+
+test('Excel updater summary rename failure preserves an existing summary and removes temporary JSON', async t => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  fs.writeFileSync(fixture.summaryPath, '{"existing":true}\n');
+  const originalRename = fs.renameSync;
+  fs.renameSync = (source, target) => {
+    if (path.resolve(target) === path.resolve(fixture.summaryPath)) throw new Error('simulated summary rename failure');
+    return originalRename(source, target);
+  };
+  try {
+    await assert.rejects(() => generateImportWorkbook({
+      workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+      configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+    }), /simulated summary rename failure/);
+  } finally {
+    fs.renameSync = originalRename;
+  }
+  assert.equal(fs.readFileSync(fixture.summaryPath, 'utf8'), '{"existing":true}\n');
+  assert.deepEqual(fs.readdirSync(fixture.directory).filter(name => name.endsWith('.tmp.json')), []);
 });
