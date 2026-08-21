@@ -4117,3 +4117,29 @@ test('market view recognizes QEEQ MM aliases and ranks MM outside Top 3', () => 
   assert.equal(view.cheaper_provider_count, 3);
   assert.equal(view.mm_cars_rental.provider_name, 'Mm car rental');
 });
+
+test('MM availability separates present confirmed missing and incomplete dates', () => {
+  const { classifyMmAvailability, buildMmAvailabilityAlert } = require('../src/qeeq/mmAvailability');
+  const publicOffer = provider_name => ({ record_type: 'offer', provider_name, total_price: 200,
+    daily_price: 100, currency: 'PLN', price_tier: 'public', price_verified: true });
+  const scenario = (date, airport_key, rental_days, status, offers) => ({
+    key: `${airport_key}|${date}|${rental_days}`, airport_key, rental_days, status,
+    pickup_at: `${date}T10:00:00`, offers
+  });
+  const payload = {
+    options: { start_dates: ['2026-09-01', '2026-09-02', '2026-09-03'], airport_keys: ['ktw', 'krk'], durations_days: [2] },
+    scenarios: [
+      scenario('2026-09-01', 'ktw', 2, 'success', [publicOffer('MM Car Rental')]),
+      scenario('2026-09-01', 'krk', 2, 'failure', []),
+      scenario('2026-09-02', 'ktw', 2, 'success', [publicOffer('Ace')]),
+      scenario('2026-09-02', 'krk', 2, 'success', [publicOffer('Alamo')]),
+      scenario('2026-09-03', 'ktw', 2, 'success', [publicOffer('Ace')])
+    ]
+  };
+  const result = classifyMmAvailability(payload);
+  assert.deepEqual(result.dates.map(item => [item.pickup_date, item.status]), [
+    ['2026-09-01', 'present'], ['2026-09-02', 'confirmed_missing'], ['2026-09-03', 'incomplete']
+  ]);
+  assert.match(buildMmAvailabilityAlert(payload), /Brak MM - pelne dane\n- 2026-09-02/);
+  assert.match(buildMmAvailabilityAlert(payload), /Nie mozna potwierdzic - niepelne dane\n- 2026-09-03/);
+});
