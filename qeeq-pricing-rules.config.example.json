@@ -1,0 +1,12 @@
+{
+  "pricing": {
+    "top1GapThresholdPlnDay": 10,
+    "top1RaiseBufferPlnDay": 1,
+    "top1UndercutThresholdPlnDay": 10,
+    "undercutBufferPlnDay": 1,
+    "top3SmallDecreaseThresholdPlnDay": 10,
+    "minChangePlnDay": 0.5,
+    "roundingIncrementPlnDay": 0.01,
+    "maxRecommendationRentalDays": 7
+  }
+}

@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { randomUUID } = require('node:crypto');
 const { catalogEntryForLocation } = require('./locations');
 const { loadConfig, parseCliArgs, printHelp } = require('./config');
 const { isVerifiedConditionalOffer, isVerifiedPublicOffer, scenarioArtifactRef } = require('./utils');
@@ -190,11 +191,22 @@ function buildRootPayload(input = {}) {
 }
 
 function writeAtomicJson(target, value) {
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  const temp = `${target}.tmp`;
+  const absoluteTarget = path.resolve(target);
+  const directory = path.dirname(absoluteTarget);
+  fs.mkdirSync(directory, { recursive: true });
+  const temp = path.join(directory, `.${path.basename(absoluteTarget)}.${process.pid}.${randomUUID()}.tmp`);
   try {
     fs.writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-    fs.renameSync(temp, target);
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        fs.renameSync(temp, absoluteTarget);
+        break;
+      } catch (error) {
+        const transient = ['EACCES', 'EBUSY', 'EPERM'].includes(error?.code);
+        if (!transient || attempt >= 2) throw error;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (attempt + 1));
+      }
+    }
   } catch (error) {
     fs.rmSync(temp, { force: true });
     throw error;

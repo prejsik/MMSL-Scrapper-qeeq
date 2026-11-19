@@ -13,7 +13,10 @@ const CSV_HEADERS = [
   'price_tier','price_scope','price_verified','conditional_price_verified',
   'parsing_source','source_search_url','captured_at'
 ];
-const AUX_MANIFEST_FILES = ['qeeq-results-latest.json', 'qeeq-results.csv', 'qeeq-report.html', 'qeeq-summary.xlsx'];
+const AUX_MANIFEST_FILES = [
+  'qeeq-results-latest.json', 'qeeq-results.csv', 'qeeq-report.html', 'qeeq-summary.xlsx',
+  'qeeq-pricing-recommendations.json'
+];
 
 function csvValue(value) {
   const safe = typeof value === 'string' && /^\s*[=+\-@]/.test(value) ? `'${value}` : value;
@@ -159,7 +162,7 @@ function parseAuxArgs(argv) {
 }
 
 function printAuxHelp() {
-  console.log('Usage: node src/qeeq/report.js --input=output/qeeq-results-latest.json --output-quality=output/quality-summary.json --output-manifest=output/run-manifest.json --manifest-files=output/qeeq-results-latest.json,output/qeeq-results.csv,output/qeeq-report.html,output/qeeq-summary.xlsx');
+  console.log('Usage: node src/qeeq/report.js --input=output/qeeq-results-latest.json --output-quality=output/quality-summary.json --output-manifest=output/run-manifest.json --manifest-files=output/qeeq-results-latest.json,output/qeeq-results.csv,output/qeeq-report.html,output/qeeq-summary.xlsx,output/qeeq-pricing-recommendations.json');
 }
 
 function main(argv = process.argv.slice(2)) {
@@ -179,7 +182,7 @@ function main(argv = process.argv.slice(2)) {
   const fileNames = files.map(file => path.basename(file));
   if (files.length !== AUX_MANIFEST_FILES.length || new Set(fileNames).size !== files.length
     || fileNames.some(name => !AUX_MANIFEST_FILES.includes(name))) {
-    throw new Error('manifest-files must contain the exact QEEQ JSON, CSV, HTML, and XLSX files');
+    throw new Error('manifest-files must contain the exact QEEQ JSON, CSV, HTML, XLSX, and pricing recommendation files');
   }
   const outputDirIdentity = pathIdentity(outputDir);
   if (pathIdentity(path.dirname(qualityPath)) !== outputDirIdentity || files.some(file => pathIdentity(path.dirname(file)) !== outputDirIdentity)) {

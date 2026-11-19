@@ -1176,6 +1176,70 @@ test('executeRun writes an atomic snapshot after each scenario', async () => {
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
+test('run JSON writer retries a transient rename lock and uses a unique temporary file per write', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { writeAtomicJson } = require('../src/qeeq/run');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-run-atomic-'));
+  const output = path.join(directory, 'result.json');
+  const originalRename = fs.renameSync;
+  const renameSources = [];
+  let renameAttempts = 0;
+  try {
+    fs.renameSync = (source, destination) => {
+      renameSources.push(source);
+      renameAttempts += 1;
+      if (renameAttempts === 1) {
+        const error = new Error('simulated OneDrive rename lock');
+        error.code = 'EPERM';
+        throw error;
+      }
+      return originalRename(source, destination);
+    };
+
+    writeAtomicJson(output, { completed_at: '2026-08-21T15:00:00.000Z' });
+    writeAtomicJson(output, { completed_at: '2026-08-21T15:01:00.000Z' });
+
+    assert.equal(renameAttempts, 3);
+    assert.equal(renameSources[0], renameSources[1]);
+    assert.notEqual(renameSources[0], renameSources[2]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(output, 'utf8')), { completed_at: '2026-08-21T15:01:00.000Z' });
+    assert.deepEqual(fs.readdirSync(directory), ['result.json']);
+  } finally {
+    fs.renameSync = originalRename;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('run JSON writer preserves the existing target and removes its temp file after retries are exhausted', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { writeAtomicJson } = require('../src/qeeq/run');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-run-atomic-failure-'));
+  const output = path.join(directory, 'result.json');
+  const originalRename = fs.renameSync;
+  let renameAttempts = 0;
+  fs.writeFileSync(output, 'OLD JSON');
+  try {
+    fs.renameSync = () => {
+      renameAttempts += 1;
+      const error = new Error('simulated permanent OneDrive rename lock');
+      error.code = 'EPERM';
+      throw error;
+    };
+
+    assert.throws(() => writeAtomicJson(output, { completed_at: '2026-08-21T15:00:00.000Z' }), error => error?.code === 'EPERM');
+    assert.equal(renameAttempts, 3);
+    assert.equal(fs.readFileSync(output, 'utf8'), 'OLD JSON');
+    assert.deepEqual(fs.readdirSync(directory), ['result.json']);
+  } finally {
+    fs.renameSync = originalRename;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('canonical envelopes keep only the stable QEEQ search URL', () => {
   const { buildRootPayload, buildScenarioPayload } = require('../src/qeeq/run');
   const scenario = { key: 'a', airport: { key: 'ktw', iata: 'KTW' }, pickupDate: '2026-09-01', pickupTime: '10:00', dropoffDate: '2026-09-03', dropoffTime: '10:00', rentalDays: 2 };
@@ -1225,7 +1289,10 @@ test('auxiliary reports preflight complete inputs and write actual descriptors a
   const path = require('node:path');
   const { main } = require('../src/qeeq/report');
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-aux-'));
-  const names = ['qeeq-results-latest.json', 'qeeq-results.csv', 'qeeq-report.html', 'qeeq-summary.xlsx'];
+  const names = [
+    'qeeq-results-latest.json', 'qeeq-results.csv', 'qeeq-report.html', 'qeeq-summary.xlsx',
+    'qeeq-pricing-recommendations.json'
+  ];
   const files = names.map(name => path.join(directory, name));
   const quality = path.join(directory, 'quality-summary.json');
   const manifest = path.join(directory, 'run-manifest.json');
@@ -1234,19 +1301,20 @@ test('auxiliary reports preflight complete inputs and write actual descriptors a
     fs.writeFileSync(files[1], 'csv');
     fs.writeFileSync(files[2], '<html>report</html>');
     fs.writeFileSync(files[3], 'xlsx');
+    fs.writeFileSync(files[4], JSON.stringify({ schema_version: 1, provider: 'qeeq.pl', counts: {} }));
     assert.equal(main(['--input=' + files[0], '--output-quality=' + quality, '--output-manifest=' + manifest, '--manifest-files=' + files.join(',')]), 0);
     const built = JSON.parse(fs.readFileSync(manifest, 'utf8'));
     assert.deepEqual(built.files.map(item => item.bytes), files.map(file => fs.statSync(file).size));
     assert.deepEqual(built.files.map(item => item.sha256), files.map(file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')));
     fs.rmSync(quality);
     fs.rmSync(manifest);
-    fs.rmSync(files[3]);
+    fs.rmSync(files[4]);
     assert.throws(() => main(['--input=' + files[0], '--output-quality=' + quality, '--output-manifest=' + manifest, '--manifest-files=' + files.join(',')]), /Missing manifest input/);
     assert.equal(fs.existsSync(quality), false);
     assert.equal(fs.existsSync(manifest), false);
     assert.throws(() => main(['--input=' + path.join(directory, 'other.json'), '--output-quality=' + quality, '--output-manifest=' + manifest, '--manifest-files=' + files.join(',')]), /exactly match/);
     assert.throws(() => main(['--input=' + files[0], '--output-quality=' + files[1], '--output-manifest=' + manifest, '--manifest-files=' + files.join(',')]), /cannot collide/);
-    assert.throws(() => main(['--input=' + files[0], '--output-quality=' + quality, '--output-manifest=' + manifest, '--manifest-files=' + [files[0], files[1], files[2], path.join(os.tmpdir(), 'qeeq-summary.xlsx')].join(',')]), /common output directory/);
+    assert.throws(() => main(['--input=' + files[0], '--output-quality=' + quality, '--output-manifest=' + manifest, '--manifest-files=' + [files[0], files[1], files[2], files[3], path.join(os.tmpdir(), 'qeeq-pricing-recommendations.json')].join(',')]), /common output directory/);
     assert.equal(main(['--help']), 0);
     assert.equal(fs.existsSync(quality), false);
     assert.equal(fs.existsSync(manifest), false);
@@ -1314,7 +1382,10 @@ test('auxiliary reports reject a Windows case-variant output collision without o
   const path = require('node:path');
   const { main } = require('../src/qeeq/report');
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-aux-case-'));
-  const names = ['qeeq-results-latest.json', 'qeeq-results.csv', 'qeeq-report.html', 'qeeq-summary.xlsx'];
+  const names = [
+    'qeeq-results-latest.json', 'qeeq-results.csv', 'qeeq-report.html', 'qeeq-summary.xlsx',
+    'qeeq-pricing-recommendations.json'
+  ];
   const files = names.map(name => path.join(directory, name));
   const quality = path.join(directory, 'quality-summary.json');
   const manifest = path.join(directory, 'run-manifest.json');
@@ -1324,6 +1395,7 @@ test('auxiliary reports reject a Windows case-variant output collision without o
     fs.writeFileSync(files[1], originalCsv);
     fs.writeFileSync(files[2], '<html>report</html>');
     fs.writeFileSync(files[3], 'xlsx');
+    fs.writeFileSync(files[4], JSON.stringify({ schema_version: 1, provider: 'qeeq.pl', counts: {} }));
     assert.throws(() => main(['--input=' + files[0], '--output-quality=' + path.join(directory, 'QEEQ-RESULTS.CSV'), '--output-manifest=' + manifest, '--manifest-files=' + files.join(',')]), /cannot collide/);
     assert.equal(fs.readFileSync(files[1], 'utf8'), originalCsv);
     assert.equal(fs.existsSync(quality), false);
@@ -1789,8 +1861,8 @@ test('HTML ranks only finite verified public totals and separates conditional pr
   assert.match(html, /CARWIZ/);
   assert.match(html, /newcomer_coupon[\s\S]*106/);
   assert.match(html, /Cena Diamentowa[\s\S]*98/);
-  const top3 = html.match(/<section id="top3">([\s\S]*?)<\/section>/)[1];
-  assert.match(top3, /CHEAPEST[\s\S]*100[\s\S]*TIE FIRST[\s\S]*119[\s\S]*TIE SECOND[\s\S]*119/);
+  const top3 = html.match(/<section id="top3"[^>]*>([\s\S]*?)<\/section>/)[1];
+  assert.match(top3, /CHEAPEST[\s\S]*50 PLN[\s\S]*TIE FIRST[\s\S]*59\.5 PLN[\s\S]*TIE SECOND[\s\S]*59\.5 PLN/);
   assert.doesNotMatch(top3, /FOURTH|CARWIZ|MEMBER|INFINITE|NULL TIER/);
 });
 
@@ -1919,22 +1991,45 @@ test('HTML inline filters require one offer row to match provider and transmissi
     { dataset: { airport: 'KTW', pickupDate: '2026-09-19', duration: '2', transmission: 'Automatic', provider: 'A', status: 'success' }, hidden: false },
     { dataset: { airport: 'KTW', pickupDate: '2026-09-19', duration: '2', transmission: 'Manual', provider: 'B', status: 'success' }, hidden: false }
   ];
-  const article = { dataset: { airport: 'KTW', pickupDate: '2026-09-19', duration: '2', status: 'success' }, hidden: false, querySelectorAll() { return rows; } };
-  const emptyArticle = { dataset: { airport: 'KTW', pickupDate: '2026-09-19', duration: '2', status: 'failure' }, hidden: false, querySelectorAll() { return []; } };
+  const detailArticle = { dataset: { key: 'x', airport: 'KTW', pickupDate: '2026-09-19', duration: '2', status: 'success' }, hidden: false, querySelectorAll() { return rows; } };
+  const emptyDetailArticle = { dataset: { key: 'y', airport: 'KTW', pickupDate: '2026-09-19', duration: '2', status: 'failure' }, hidden: false, querySelectorAll() { return []; } };
+  const marketArticle = { dataset: { key: 'x', airport: 'KTW', pickupDate: '2026-09-19', duration: '2', status: 'success' }, hidden: false };
+  const emptyMarketArticle = { dataset: { key: 'y', airport: 'KTW', pickupDate: '2026-09-19', duration: '2', status: 'failure' }, hidden: false };
+  const resultsStatus = { textContent: '' };
+  const emptyState = { hidden: true };
   const document = {
-    getElementById(id) { return controls[id.replace('filter-', '')]; },
-    querySelectorAll(selector) { return selector === 'article.scenario' ? [article, emptyArticle] : rows; }
+    getElementById(id) {
+      if (id === 'results-status') return resultsStatus;
+      if (id === 'empty-state') return emptyState;
+      return controls[id.replace('filter-', '')];
+    },
+    querySelectorAll(selector) {
+      if (selector === 'article.scenario') return [detailArticle, emptyDetailArticle];
+      if (selector === 'article.market-scenario') return [marketArticle, emptyMarketArticle];
+      if (selector === 'tr.filterable-offer') return rows;
+      return [];
+    }
   };
   vm.runInNewContext(script, { document });
   controls.provider.value = 'A';
   controls.transmission.value = 'Manual';
   controls.provider.callback();
-  assert.equal(article.hidden, true);
-  assert.equal(emptyArticle.hidden, true);
+  assert.equal(marketArticle.hidden, true);
+  assert.equal(emptyMarketArticle.hidden, true);
+  assert.equal(detailArticle.hidden, true);
+  assert.equal(emptyDetailArticle.hidden, true);
+  assert.deepEqual(rows.map(row => row.hidden), [true, true]);
+  assert.equal(resultsStatus.textContent, 'Widoczne scenariusze: 0');
+  assert.equal(emptyState.hidden, false);
   controls.transmission.value = 'Automatic';
   controls.provider.callback();
-  assert.equal(article.hidden, false);
+  assert.equal(marketArticle.hidden, false);
+  assert.equal(emptyMarketArticle.hidden, true);
+  assert.equal(detailArticle.hidden, false);
+  assert.equal(emptyDetailArticle.hidden, true);
   assert.deepEqual(rows.map(row => row.hidden), [false, true]);
+  assert.equal(resultsStatus.textContent, 'Widoczne scenariusze: 1');
+  assert.equal(emptyState.hidden, true);
 });
 
 test('HTML ignores malformed ranked offers and non-string pickup timestamps', () => {
@@ -1945,7 +2040,86 @@ test('HTML ignores malformed ranked offers and non-string pickup timestamps', ()
   assert.match(buildHtmlReport(payload), /<td>—<\/td>/);
 });
 
-test('XLSX contains seven usable sheets with typed verified and conditional price fields', async () => {
+function marketReportFixture() {
+  return {
+    run_status: 'success', quality_status: 'pass',
+    options: { start_dates: ['2026-09-19'], airport_keys: ['katowice-pyrzowice'], durations_days: [2] },
+    scenarios: [{
+      key: 'ktw:2026-09-19:2', status: 'success', airport_key: 'katowice-pyrzowice', iata: 'KTW', pickup_at: '2026-09-19T10:00:00', rental_days: 2,
+      offers: [
+        { provider_name: 'Ace', vehicle_name: 'Fiesta', total_price: 100, daily_price: 50, currency: 'PLN', price_tier: 'public', price_verified: true },
+        { provider_name: 'Ace', vehicle_name: 'Focus', total_price: 105, daily_price: 52.5, currency: 'PLN', price_tier: 'public', price_verified: true },
+        { provider_name: 'Alamo', vehicle_name: 'Corsa', total_price: 110, daily_price: 55, currency: 'PLN', price_tier: 'public', price_verified: true },
+        { provider_name: 'Europcar', vehicle_name: 'Golf', total_price: 120, daily_price: 60, currency: 'PLN', price_tier: 'public', price_verified: true },
+        { provider_name: 'MM Cars Rental', vehicle_name: 'Octavia', total_price: 130, daily_price: 65, currency: 'PLN', price_tier: 'public', price_verified: true }
+      ]
+    }]
+  };
+}
+
+test('HTML uses the DiscoverCars visual hierarchy for a compact Top 3 and MM market view', () => {
+  const { buildHtmlReport } = require('../src/qeeq/reportHtml');
+  const html = buildHtmlReport(marketReportFixture());
+  const market = html.match(/<section id="top3"[^>]*>([\s\S]*?)<\/section>/)?.[1] || '';
+
+  assert.match(html, /color-scheme:dark/);
+  assert.match(html, /--bg:\s*#0c1015/);
+  assert.match(html, /id="toggle-filters"/);
+  assert.match(html, /class="toolbar"/);
+  assert.match(market, /2026-09-19[\s\S]*2 dni/);
+  for (const heading of ['Top 1 firma', 'Top 1 PLN/d', 'Top 2 firma', 'Top 2 PLN/d', 'Top 3 firma', 'Top 3 PLN/d', 'MM PLN/d', 'Pozycja MM', 'Status danych']) {
+    assert.match(market, new RegExp(heading.replace('/', '\\/')));
+  }
+  assert.equal((market.match(/data-top-provider="Ace"/g) || []).length, 1);
+  assert.match(market, /MM Cars Rental[\s\S]*65 PLN[\s\S]*4[\s\S]*3/);
+  assert.match(html, /<details id="details"(?![^>]*\sopen)[^>]*>/);
+});
+
+test('HTML gives present, confirmed-missing, and incomplete MM evidence distinct Polish statuses', () => {
+  const { buildHtmlReport } = require('../src/qeeq/reportHtml');
+  const payload = marketReportFixture();
+  payload.options.start_dates = ['2026-09-19', '2026-09-20', '2026-09-21'];
+  payload.scenarios.push(
+    {
+      key: 'ktw:2026-09-20:2', status: 'success', airport_key: 'katowice-pyrzowice', iata: 'KTW', pickup_at: '2026-09-20T10:00:00', rental_days: 2,
+      offers: [{ provider_name: 'Ace', vehicle_name: 'Fiesta', total_price: 100, daily_price: 50, currency: 'PLN', price_tier: 'public', price_verified: true }]
+    },
+    {
+      key: 'ktw:2026-09-21:2', status: 'failure', airport_key: 'katowice-pyrzowice', iata: 'KTW', pickup_at: '2026-09-21T10:00:00', rental_days: 2,
+      offers: []
+    }
+  );
+  const html = buildHtmlReport(payload);
+  const scenario = key => html.match(new RegExp(`<article class="market-scenario" data-key="${key}"[^>]*>[\\s\\S]*?<\\/article>`))?.[0] || '';
+
+  const present = scenario('ktw:2026-09-19:2');
+  assert.match(present, /data-mm-availability="present"/);
+  assert.match(present, /class="status-badge mm-present">MM dostępne/);
+  const missing = scenario('ktw:2026-09-20:2');
+  assert.match(missing, /data-mm-availability="confirmed_missing"/);
+  assert.match(missing, /class="status-badge mm-missing">Brak MM — pełne dane/);
+  const incomplete = scenario('ktw:2026-09-21:2');
+  assert.match(incomplete, /data-mm-availability="incomplete"/);
+  assert.match(incomplete, /class="status-badge mm-incomplete">Nie można potwierdzić — niepełne dane/);
+});
+
+test('HTML and XLSX use distinct-provider Top 3 and expose MM rank separately', async () => {
+  const { buildHtmlReport } = require('../src/qeeq/reportHtml');
+  const { buildWorkbook } = require('../src/qeeq/reportXlsx');
+  const payload = marketReportFixture();
+  const html = buildHtmlReport(payload);
+  assert.equal((html.match(/data-top-provider="Ace"/g) || []).length, 1);
+  assert.match(html, /MM Cars Rental.*Pozycja.*4/s);
+  const workbook = await buildWorkbook(payload);
+  assert.deepEqual(workbook.worksheets.map(sheet => sheet.name), [
+    'Overview', 'Top 3', 'By airport', 'By duration', 'Providers', 'Details', 'MM Cars Rental', 'Data quality'
+  ]);
+  assert.equal(workbook.getWorksheet('Top 3').getCell('F2').value, 'Ace');
+  assert.equal(workbook.getWorksheet('Top 3').getCell('F3').value, 'Alamo');
+  assert.equal(workbook.getWorksheet('MM Cars Rental').getCell('F2').value, 4);
+});
+
+test('XLSX contains eight usable sheets with typed verified and conditional price fields', async () => {
   const { buildDetailRows, buildWorkbook } = require('../src/qeeq/reportXlsx');
   const payload = {
     run_status: 'partial', quality_status: 'warning', expected_checks: 2, completed_checks: 1, failed_checks: 1,
@@ -1969,7 +2143,7 @@ test('XLSX contains seven usable sheets with typed verified and conditional pric
   assert.equal(detailRows[4]['Diamond/member total'], 98);
 
   const workbook = await buildWorkbook(payload);
-  assert.deepEqual(workbook.worksheets.map(sheet => sheet.name), ['Overview', 'Top 3', 'By airport', 'By duration', 'Providers', 'Details', 'Data quality']);
+  assert.deepEqual(workbook.worksheets.map(sheet => sheet.name), ['Overview', 'Top 3', 'By airport', 'By duration', 'Providers', 'Details', 'MM Cars Rental', 'Data quality']);
   for (const sheet of workbook.worksheets) {
     assert.equal(sheet.views[0].state, 'frozen');
     assert.equal(sheet.views[0].ySplit, 1);
@@ -2052,7 +2226,7 @@ test('XLSX exposes exact interfaces and CLI writes a same-directory atomic file 
     assert.equal(made.status, 0);
     const loaded = new ExcelJS.Workbook();
     await loaded.xlsx.readFile(output);
-    assert.deepEqual(loaded.worksheets.map(sheet => sheet.name), ['Overview', 'Top 3', 'By airport', 'By duration', 'Providers', 'Details', 'Data quality']);
+    assert.deepEqual(loaded.worksheets.map(sheet => sheet.name), ['Overview', 'Top 3', 'By airport', 'By duration', 'Providers', 'Details', 'MM Cars Rental', 'Data quality']);
     assert.deepEqual(fs.readdirSync(path.dirname(output)), ['report.xlsx']);
 
     fs.writeFileSync(input, JSON.stringify({ run_status: 'partial', quality_status: 'warning', scenarios: [] }));
@@ -2218,6 +2392,130 @@ test('Telegram final summary includes independent statuses, counts, safe codes, 
   assert.doesNotMatch(text, /artifacts\/2/);
 });
 
+function mmAvailabilityFixture() {
+  const publicOffer = provider_name => ({
+    record_type: 'offer', provider_name, total_price: 200, daily_price: 100,
+    currency: 'PLN', price_tier: 'public', price_verified: true
+  });
+  const scenario = (date, airport_key, rental_days, status, offers) => ({
+    key: `${airport_key}|${date}|${rental_days}`, airport_key, rental_days, status,
+    pickup_at: `${date}T10:00:00`, offers
+  });
+  return {
+    options: {
+      start_dates: ['2026-09-01', '2026-09-02', '2026-09-03'],
+      airport_keys: ['ktw', 'krk'], durations_days: [2]
+    },
+    scenarios: [
+      scenario('2026-09-01', 'ktw', 2, 'success', [publicOffer('MM Car Rental')]),
+      scenario('2026-09-01', 'krk', 2, 'failure', []),
+      scenario('2026-09-02', 'ktw', 2, 'success', [publicOffer('Ace')]),
+      scenario('2026-09-02', 'krk', 2, 'success', [publicOffer('Alamo')]),
+      scenario('2026-09-03', 'ktw', 2, 'success', [publicOffer('Ace')])
+    ]
+  };
+}
+
+test('Telegram final summary labels confirmed missing and incomplete MM evidence separately', () => {
+  const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
+  const message = buildFinalSummary(mmAvailabilityFixture(), {});
+  assert.match(message, /Brak MM - pelne dane\n- 2026-09-02/);
+  assert.match(message, /Nie mozna potwierdzic - niepelne dane\n- 2026-09-03/);
+  assert.doesNotMatch(message, /Brak MM - pelne dane\n- 2026-09-03/);
+});
+
+test('Telegram final summary does not emit hostile MM date values', () => {
+  const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
+  const message = buildFinalSummary({
+    options: {
+      start_dates: ['2026-09-03', `2026-09-04\nhttps://evil.test/?ticket=secret`],
+      airport_keys: ['ktw'], durations_days: [2]
+    },
+    scenarios: []
+  }, {});
+  assert.match(message, /Nie mozna potwierdzic - niepelne dane\n- 2026-09-03/);
+  assert.doesNotMatch(message, /evil\.test|ticket=secret|\nhttps:/);
+});
+
+test('Telegram final summary adds bounded recommendation counts without leaking hostile values', () => {
+  const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
+  const text = buildFinalSummary({
+    run_status: 'success', quality_status: 'pass', quality: {}
+  }, {
+    recommendations: {
+      counts: {
+        decision_count: 12,
+        site_recommendation_count: 4,
+        import_recommendation_count: 0,
+        increase_count: 3,
+        decrease_count: 1,
+        hold_count: 6,
+        review_count: `2\nhttps://evil.test/?ticket=secret`
+      },
+      reason: 'https://evil.test/?ticket=secret'
+    },
+    reportUrl: 'https://example.test/report.html',
+    runUrl: 'https://github.com/example/actions/runs/1'
+  });
+  assert.match(text, /Rekomendacje — decyzje: 12, site: 4, import: 0/);
+  assert.match(text, /zwiększ: 3, zmniejsz: 1, hold: 6, review: 0/);
+  assert.match(text, /Raport: https:\/\/example\.test\/report\.html/);
+  assert.match(text, /Run GitHub Actions: https:\/\/github\.com\/example\/actions\/runs\/1/);
+  assert.doesNotMatch(text, /evil\.test|ticket=secret/);
+  assert.ok([...text].length <= 4096);
+
+  const countsOnly = buildFinalSummary({}, { recommendations: { decision_count: 2, site_recommendation_count: 1 } });
+  assert.match(countsOnly, /Rekomendacje — decyzje: 2, site: 1, import: 0/);
+});
+
+test('Telegram final summary stays within 4096 characters and preserves prioritized links', () => {
+  const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
+  const startDates = Array.from({ length: 500 }, (_, index) => {
+    const date = new Date(Date.UTC(2026, 0, 1 + index));
+    return date.toISOString().slice(0, 10);
+  });
+  const text = buildFinalSummary({
+    options: { start_dates: startDates, airport_keys: ['ktw'], durations_days: [2] },
+    scenarios: []
+  }, {
+    recommendations: { counts: { decision_count: 500, review_count: 500 } },
+    reportUrl: 'https://example.test/report.html',
+    runUrl: 'https://github.com/example/actions/runs/1'
+  });
+  assert.ok([...text].length <= 4096);
+  assert.match(text, /Raport: https:\/\/example\.test\/report\.html/);
+  assert.match(text, /Run GitHub Actions: https:\/\/github\.com\/example\/actions\/runs\/1/);
+});
+
+test('Telegram bounds mixed MM evidence structurally without dropping either status', () => {
+  const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
+  const publicOffer = {
+    record_type: 'offer', provider_name: 'Ace', total_price: 200, daily_price: 100,
+    currency: 'PLN', price_tier: 'public', price_verified: true
+  };
+  const startDates = Array.from({ length: 500 }, (_, index) => {
+    const date = new Date(Date.UTC(2026, 0, 1 + index));
+    return date.toISOString().slice(0, 10);
+  });
+  const scenarios = startDates.slice(0, 450).map(date => ({
+    key: `ktw|${date}|2`, airport_key: 'ktw', rental_days: 2, status: 'success',
+    pickup_at: `${date}T10:00:00`, offers: [publicOffer]
+  }));
+  const text = buildFinalSummary({
+    options: { start_dates: startDates, airport_keys: ['ktw'], durations_days: [2] },
+    scenarios
+  }, {
+    reportUrl: 'https://example.test/report.html',
+    runUrl: 'https://github.com/example/actions/runs/1'
+  });
+  assert.ok([...text].length <= 4096);
+  assert.match(text, /Brak MM - pelne dane\n/);
+  assert.match(text, /Brak MM - pelne dane[\s\S]*- \.\.\. pominięto: \d+/);
+  assert.match(text, /Nie mozna potwierdzic - niepelne dane\n- 2027-03-27/);
+  assert.match(text, /Raport: https:\/\/example\.test\/report\.html/);
+  assert.match(text, /Run GitHub Actions: https:\/\/github\.com\/example\/actions\/runs\/1/);
+});
+
 test('Telegram summaries reject unsafe links and sanitize hostile malformed inputs deterministically', () => {
   const { buildFinalSummary } = require('../src/qeeq/telegramSummary');
   const hostile = { toString: null };
@@ -2317,6 +2615,9 @@ test('Telegram summary argument parser has exact modes and rejects ambiguous arg
   assert.deepEqual(summary.parseSummaryArgs(['--mode=final-summary', '--input=result.json', '--report-url=https://example.test/report']), {
     mode: 'final-summary', input: 'result.json', reportUrl: 'https://example.test/report'
   });
+  assert.deepEqual(summary.parseSummaryArgs(['--mode=final-summary', '--input=result.json', '--recommendations=recommendations.json']), {
+    mode: 'final-summary', input: 'result.json', recommendations: 'recommendations.json'
+  });
   assert.deepEqual(summary.parseSummaryArgs(['--mode=plan-failure', '--error=invalid matrix', '--run-url=https://example.test/run']), {
     mode: 'plan-failure', error: 'invalid matrix', runUrl: 'https://example.test/run'
   });
@@ -2324,6 +2625,7 @@ test('Telegram summary argument parser has exact modes and rejects ambiguous arg
     [], ['--help', '--mode=final-summary'], ['--wat=yes'], ['positional'], ['--mode'],
     ['--mode=other'], ['--mode=final-summary'], ['--mode=plan-failure'],
     ['--mode=final-summary', '--input=a', '--input=b'],
+    ['--mode=final-summary', '--input=a', '--recommendations=a', '--recommendations=b'],
     ['--mode=final-summary', '--input=a', '--error=bad'],
     ['--mode=plan-failure', '--error=bad', '--input=a'],
     ['--mode=plan-failure', '--error=bad', '--report-url=https://example.test/report'],
@@ -4087,4 +4389,844 @@ test('workflow actions are pinned to reviewed immutable commits', () => {
   for (const [, action, revision] of uses) {
     assert.equal(revision, expected.get(action), `${action} must use its reviewed commit`);
   }
+});
+
+test('daily merge publishes QEEQ recommendations but never runs the Excel updater', () => {
+  const packageJson = require('../package.json');
+  const fs = require('node:fs');
+  const workflow = fs.readFileSync('.github/workflows/qeeq-daily.yml', 'utf8');
+  const smoke = fs.readFileSync('.github/workflows/qeeq-smoke.yml', 'utf8');
+  assert.equal(packageJson.scripts['qeeq:recommend'],
+    'node src/qeeq/pricingRecommendations.js output/qeeq-results-latest.json output/qeeq-pricing-recommendations.json --config=qeeq-pricing-rules.config.example.json --calibration=qeeq-rate-calibration.config.example.json');
+  assert.equal(packageJson.scripts['qeeq:excel'], 'node src/qeeq/updateExcelRates.js');
+  assert.match(packageJson.scripts['qeeq:aux'], /output\/qeeq-pricing-recommendations\.json/);
+  assert.match(workflow, /npm run qeeq:recommend/);
+  assert.match(workflow, /output\/qeeq-pricing-recommendations\.json/);
+  assert.match(workflow, /merged\/qeeq-pricing-recommendations\.json/);
+  assert.match(workflow, /--recommendations=merged\/qeeq-pricing-recommendations\.json/);
+  assert.doesNotMatch(workflow, /qeeq:excel|updateExcelRates|qeeq-rates-import-ready\.xlsx/);
+  assert.doesNotMatch(smoke, /qeeq:recommend|qeeq:excel|pricingRecommendations|updateExcelRates|qeeq-pricing|deploy-pages|TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID/);
+});
+
+test('market view ranks the cheapest verified offer from each distinct provider', () => {
+  const { rankVerifiedProviders, buildScenarioMarketView } = require('../src/qeeq/marketView');
+  const offer = (provider_name, total_price, vehicle_name) => ({
+    record_type: 'offer', provider_name, total_price, daily_price: total_price / 2,
+    vehicle_name, currency: 'PLN', price_tier: 'public', price_verified: true
+  });
+  const offers = [
+    offer('Ace', 169, 'Fiesta'), offer(' ACE ', 171, 'Golf'), offer('Alamo', 180, 'Corsa'),
+    offer('Europcar', 190, 'Focus'), { ...offer('Hidden', 1, 'Bad'), price_verified: false }
+  ];
+  assert.deepEqual(rankVerifiedProviders(offers).map(item => item.provider_name), ['Ace', 'Alamo', 'Europcar']);
+  assert.deepEqual(buildScenarioMarketView({ offers }).top_3_providers.map(item => item.total_price), [169, 180, 190]);
+});
+
+test('market view recognizes QEEQ MM aliases and ranks MM outside Top 3', () => {
+  const { isMmCarsProvider, buildScenarioMarketView } = require('../src/qeeq/marketView');
+  assert.equal(isMmCarsProvider('Mm car rental'), true);
+  assert.equal(isMmCarsProvider('MM Cars Rental'), true);
+  assert.equal(isMmCarsProvider('MM Service Lease Polska'), true);
+  const offers = ['Ace', 'Alamo', 'Europcar', 'Mm car rental'].map((provider_name, index) => ({
+    record_type: 'offer', provider_name, total_price: 100 + index * 10, daily_price: 50 + index * 5,
+    vehicle_name: provider_name, currency: 'PLN', price_tier: 'public', price_verified: true
+  }));
+  const view = buildScenarioMarketView({ offers });
+  assert.equal(view.mm_provider_rank, 4);
+  assert.equal(view.cheaper_provider_count, 3);
+  assert.equal(view.mm_cars_rental.provider_name, 'Mm car rental');
+});
+
+test('MM availability separates present confirmed missing and incomplete dates', () => {
+  const { classifyMmAvailability, buildMmAvailabilityAlert } = require('../src/qeeq/mmAvailability');
+  const publicOffer = provider_name => ({ record_type: 'offer', provider_name, total_price: 200,
+    daily_price: 100, currency: 'PLN', price_tier: 'public', price_verified: true });
+  const scenario = (date, airport_key, rental_days, status, offers) => ({
+    key: `${airport_key}|${date}|${rental_days}`, airport_key, rental_days, status,
+    pickup_at: `${date}T10:00:00`, offers
+  });
+  const payload = {
+    options: { start_dates: ['2026-09-01', '2026-09-02', '2026-09-03'], airport_keys: ['ktw', 'krk'], durations_days: [2] },
+    scenarios: [
+      scenario('2026-09-01', 'ktw', 2, 'success', [publicOffer('MM Car Rental')]),
+      scenario('2026-09-01', 'krk', 2, 'failure', []),
+      scenario('2026-09-02', 'ktw', 2, 'success', [publicOffer('Ace')]),
+      scenario('2026-09-02', 'krk', 2, 'success', [publicOffer('Alamo')]),
+      scenario('2026-09-03', 'ktw', 2, 'success', [publicOffer('Ace')])
+    ]
+  };
+  const result = classifyMmAvailability(payload);
+  assert.deepEqual(result.dates.map(item => [item.pickup_date, item.status]), [
+    ['2026-09-01', 'present'], ['2026-09-02', 'confirmed_missing'], ['2026-09-03', 'incomplete']
+  ]);
+  assert.match(buildMmAvailabilityAlert(payload), /Brak MM - pelne dane\n- 2026-09-02/);
+  assert.match(buildMmAvailabilityAlert(payload), /Nie mozna potwierdzic - niepelne dane\n- 2026-09-03/);
+});
+
+test('MM availability treats duplicate scenario tuples as incomplete evidence', () => {
+  const { classifyMmAvailability } = require('../src/qeeq/mmAvailability');
+  const offer = provider_name => ({
+    record_type: 'offer', provider_name, total_price: 200, daily_price: 100,
+    currency: 'PLN', price_tier: 'public', price_verified: true
+  });
+  const scenario = {
+    key: 'ktw:2026-09-04:2', airport_key: 'ktw', rental_days: 2, status: 'success',
+    pickup_at: '2026-09-04T10:00:00', offers: [offer('Ace')]
+  };
+  const result = classifyMmAvailability({
+    options: { start_dates: ['2026-09-04'], airport_keys: ['ktw'], durations_days: [2] },
+    scenarios: [scenario, { ...scenario, key: 'duplicate' }]
+  });
+  assert.deepEqual(result.dates.map(item => [item.status, item.completed_checks, item.failed_checks]), [
+    ['incomplete', 0, 1]
+  ]);
+});
+
+test('MM availability requires a verified public offer for complete evidence', () => {
+  const { classifyMmAvailability } = require('../src/qeeq/mmAvailability');
+  const result = classifyMmAvailability({
+    options: { start_dates: ['2026-09-05'], airport_keys: ['ktw'], durations_days: [2] },
+    scenarios: [{
+      key: 'ktw:2026-09-05:2', airport_key: 'ktw', rental_days: 2, status: 'success',
+      pickup_at: '2026-09-05T10:00:00', offers: [{
+        record_type: 'offer', provider_name: 'Ace', total_price: null, daily_price: null,
+        currency: 'PLN', price_tier: 'unknown', price_verified: false
+      }]
+    }]
+  });
+  assert.deepEqual(result.dates.map(item => item.status), ['incomplete']);
+});
+
+test('MM availability does not treat an unverified MM offer as present', () => {
+  const { classifyMmAvailability } = require('../src/qeeq/mmAvailability');
+  const result = classifyMmAvailability({
+    options: { start_dates: ['2026-09-06'], airport_keys: ['ktw'], durations_days: [2] },
+    scenarios: [{
+      key: 'ktw:2026-09-06:2', airport_key: 'ktw', rental_days: 2, status: 'success',
+      pickup_at: '2026-09-06T10:00:00', offers: [
+        pricingOffer('Ace', 100),
+        { ...pricingOffer('MM Cars Rental', 90), total_price: null, daily_price: null, price_verified: false }
+      ]
+    }]
+  });
+  assert.deepEqual(result.dates.map(item => item.status), ['confirmed_missing']);
+});
+
+function pricingOffer(provider_name, dailyRate, rentalDays = 2) {
+  return {
+    record_type: 'offer', provider_name, vehicle_name: `${provider_name} car`,
+    total_price: dailyRate * rentalDays, daily_price: dailyRate,
+    currency: 'PLN', price_tier: 'public', price_verified: true
+  };
+}
+
+function pricingScenario({
+  key = 'katowice-pyrzowice:2026-09-10:2', airportKey = 'katowice-pyrzowice', iata = 'KTW',
+  pickupDate = '2026-09-10', rentalDays = 2, status = 'success', offers = []
+} = {}) {
+  return {
+    key, status, airport_key: airportKey, iata, pickup_at: `${pickupDate}T10:00:00`,
+    dropoff_at: `${pickupDate}T10:00:00`, rental_days: rentalDays, offers
+  };
+}
+
+function pricingFixtureRankTwo() {
+  return {
+    schema_version: 1,
+    provider: 'qeeq.pl',
+    options: {
+      start_dates: ['2026-09-10'], airport_keys: ['katowice-pyrzowice'], durations_days: [2]
+    },
+    scenarios: [pricingScenario({ offers: [
+      pricingOffer('Ace', 100), pricingOffer('MM Cars Rental', 105), pricingOffer('Alamo', 115)
+    ] })]
+  };
+}
+
+test('QEEQ tariff mapping leaves WMI under review and maps the other airports', () => {
+  const { locationCatalog } = require('../src/qeeq/locations');
+  const byIata = new Map(locationCatalog.flatMap(city => city.airports).map(item => [item.iata, item.tariffZones]));
+  assert.deepEqual(byIata.get('WMI'), []);
+  assert.deepEqual(byIata.get('KTW'), ['KALO']);
+  assert.deepEqual(byIata.get('KRK'), ['KRLO', 'KRTI']);
+});
+
+test('pricing emits a site target but no import rate without approved QEEQ calibration', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const result = buildPricingRecommendations(pricingFixtureRankTwo(), { calibration: { approved: false } });
+  assert.equal(result.decisions[0].site_action, 'decrease');
+  assert.equal(result.decisions[0].site_target_rate_pln_day, 99);
+  assert.equal(result.decisions[0].import_action, 'review');
+  assert.equal(result.decisions[0].suggested_rate_pln_day, null);
+  assert.equal(result.decisions[0].calibration_status, 'unapproved');
+});
+
+test('pricing converts an authorized QEEQ site target with the approved multiplier', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const calibration = { approved: true, minMultiplier: 1, maxMultiplier: 1.2,
+    airportDurationMultipliers: { 'katowice-pyrzowice|2': 1.1 } };
+  const payload = pricingFixtureRankTwo();
+  payload.scenarios[0].offers.forEach(offer => { offer.daily_price = 1; });
+  const decision = buildPricingRecommendations(payload, { calibration }).decisions[0];
+  assert.equal(decision.calibration_status, 'approved');
+  assert.equal(decision.suggested_rate_pln_day, 90);
+  assert.equal(decision.import_action, 'decrease');
+});
+
+test('pricing reviews a non-positive site target produced by an extreme buffer', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const payload = pricingFixtureRankTwo();
+  payload.scenarios[0].offers = [pricingOffer('Ace', 1), pricingOffer('MM Cars Rental', 2)];
+  const calibration = { approved: true, minMultiplier: 1, maxMultiplier: 2, defaultMultiplier: 1 };
+  const result = buildPricingRecommendations(payload, {
+    calibration,
+    rules: { undercutBufferPlnDay: 2, top1UndercutThresholdPlnDay: 10 }
+  });
+  const decision = result.decisions[0];
+  assert.equal(decision.site_action, 'review');
+  assert.equal(decision.site_target_rate_pln_day, null);
+  assert.equal(decision.import_action, 'review');
+  assert.equal(decision.suggested_rate_pln_day, null);
+  assert.equal(decision.reason, 'invalid_site_target_rate');
+  assert.equal(result.site_recommendations.length, 0);
+  assert.equal(result.import_recommendations.length, 0);
+});
+
+test('pricing reviews a calibrated rate that rounds to zero for a low benchmark', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const payload = pricingFixtureRankTwo();
+  payload.scenarios[0].offers = [pricingOffer('Ace', 0.01), pricingOffer('MM Cars Rental', 0.02)];
+  const calibration = { approved: true, minMultiplier: 1, maxMultiplier: 10, defaultMultiplier: 10 };
+  const decision = buildPricingRecommendations(payload, {
+    calibration,
+    rules: { undercutBufferPlnDay: 0, top1UndercutThresholdPlnDay: 10, minChangePlnDay: 0 }
+  }).decisions[0];
+  assert.equal(decision.site_action, 'decrease');
+  assert.equal(decision.site_target_rate_pln_day, 0.01);
+  assert.equal(decision.import_action, 'review');
+  assert.equal(decision.suggested_rate_pln_day, null);
+  assert.equal(decision.calibration_reason, 'invalid_calibrated_suggested_rate');
+});
+
+test('pricing raises rank-one MM toward the second provider', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const payload = pricingFixtureRankTwo();
+  payload.scenarios[0].offers = [pricingOffer('MM Cars Rental', 80), pricingOffer('Ace', 100)];
+  const decision = buildPricingRecommendations(payload, { calibration: { approved: false } }).decisions[0];
+  assert.equal(decision.mm_provider_rank, 1);
+  assert.equal(decision.site_action, 'increase');
+  assert.equal(decision.site_target_rate_pln_day, 99);
+});
+
+test('pricing makes a small decrease for MM outside Top 3', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const payload = pricingFixtureRankTwo();
+  payload.scenarios[0].offers = [
+    pricingOffer('Ace', 80), pricingOffer('Alamo', 90), pricingOffer('Europcar', 100),
+    pricingOffer('MM Cars Rental', 105)
+  ];
+  const decision = buildPricingRecommendations(payload, { calibration: { approved: false } }).decisions[0];
+  assert.equal(decision.mm_provider_rank, 4);
+  assert.equal(decision.benchmark_provider_name, 'Europcar');
+  assert.equal(decision.site_action, 'decrease');
+  assert.equal(decision.site_target_rate_pln_day, 99);
+});
+
+test('pricing reviews missing MM and incomplete public evidence', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const missing = pricingFixtureRankTwo();
+  missing.scenarios[0].offers = [pricingOffer('Ace', 100), pricingOffer('Alamo', 110)];
+  const missingDecision = buildPricingRecommendations(missing, { calibration: { approved: false } }).decisions[0];
+  assert.equal(missingDecision.site_action, 'review');
+  assert.equal(missingDecision.reason, 'mm_not_visible');
+
+  const incomplete = pricingFixtureRankTwo();
+  incomplete.options.airport_keys.push('krakow-balice');
+  const incompleteDecision = buildPricingRecommendations(incomplete, { calibration: { approved: false } }).decisions[0];
+  assert.equal(incompleteDecision.site_action, 'review');
+  assert.equal(incompleteDecision.data_quality_status, 'incomplete');
+  assert.equal(incompleteDecision.suggested_rate_pln_day, null);
+});
+
+test('pricing holds durations above seven days', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const payload = pricingFixtureRankTwo();
+  payload.options.durations_days = [8];
+  payload.scenarios = [pricingScenario({
+    key: 'katowice-pyrzowice:2026-09-10:8', rentalDays: 8,
+    offers: [pricingOffer('Ace', 100, 8), pricingOffer('MM Cars Rental', 105, 8)]
+  })];
+  const decision = buildPricingRecommendations(payload, { calibration: { approved: false } }).decisions[0];
+  assert.equal(decision.site_action, 'hold');
+  assert.equal(decision.reason, 'duration_above_recommendation_limit');
+  assert.equal(decision.import_action, 'hold');
+});
+
+test('pricing keeps WMI import under review and holds sub-minimum changes', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const payload = pricingFixtureRankTwo();
+  payload.options.airport_keys = ['warsaw-modlin'];
+  payload.scenarios = [pricingScenario({
+    key: 'warsaw-modlin:2026-09-10:2', airportKey: 'warsaw-modlin', iata: 'WMI',
+    offers: [pricingOffer('Ace', 100), pricingOffer('MM Cars Rental', 105)]
+  })];
+  const calibration = { approved: true, minMultiplier: 1, maxMultiplier: 1.2, defaultMultiplier: 1.1 };
+  const unmapped = buildPricingRecommendations(payload, { calibration }).decisions[0];
+  assert.equal(unmapped.site_action, 'decrease');
+  assert.equal(unmapped.data_quality_status, 'unmapped_tariff_zone');
+  assert.equal(unmapped.import_action, 'review');
+  assert.equal(unmapped.suggested_rate_pln_day, null);
+
+  const smallChange = pricingFixtureRankTwo();
+  smallChange.scenarios[0].offers = [pricingOffer('Ace', 100), pricingOffer('MM Cars Rental', 100.2)];
+  const held = buildPricingRecommendations(smallChange, {
+    calibration: { approved: false }, rules: { minChangePlnDay: 1.5 }
+  }).decisions[0];
+  assert.equal(held.site_action, 'hold');
+  assert.equal(held.reason, 'change_below_minimum');
+});
+
+test('calibration uses priority order and marks an invalid approved multiplier for review', () => {
+  const { buildPricingRecommendations, resolveApprovedMultiplier } = require('../src/qeeq/pricingRecommendations');
+  const calibration = {
+    approved: true, minMultiplier: 1, maxMultiplier: 1.2, defaultMultiplier: 1.01,
+    durationMultipliers: { '2': 1.02 }, airportMultipliers: { 'katowice-pyrzowice': 1.03 },
+    airportDurationMultipliers: { 'katowice-pyrzowice|2': 1.04 }
+  };
+  assert.deepEqual(resolveApprovedMultiplier(calibration, 'katowice-pyrzowice', 2), {
+    status: 'approved', multiplier: 1.04, source: 'airport_duration'
+  });
+  assert.deepEqual(resolveApprovedMultiplier({ ...calibration, airportDurationMultipliers: {}, airportMultipliers: {}, durationMultipliers: {}, defaultMultiplier: null }, 'katowice-pyrzowice', 2), {
+    status: 'uncovered', multiplier: null, source: null
+  });
+  const invalidCalibration = { ...calibration, airportDurationMultipliers: { 'katowice-pyrzowice|2': 1.3 } };
+  assert.deepEqual(resolveApprovedMultiplier(invalidCalibration, 'katowice-pyrzowice', 2), {
+    status: 'invalid', multiplier: null, source: 'airport_duration', reason: 'invalid_or_outside_approved_range'
+  });
+  const decision = buildPricingRecommendations(pricingFixtureRankTwo(), { calibration: invalidCalibration }).decisions[0];
+  assert.equal(decision.site_action, 'decrease');
+  assert.equal(decision.site_target_rate_pln_day, 99);
+  assert.equal(decision.calibration_status, 'invalid');
+  assert.equal(decision.calibration_reason, 'invalid_or_outside_approved_range');
+  assert.equal(decision.import_action, 'review');
+  assert.equal(decision.suggested_rate_pln_day, null);
+});
+
+test('pricing rejects malformed canonical option matrices and scenario tuples', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const malformed = [];
+  const duplicateDate = pricingFixtureRankTwo();
+  duplicateDate.options.start_dates.push('2026-09-10');
+  malformed.push(duplicateDate);
+  const duplicateAirport = pricingFixtureRankTwo();
+  duplicateAirport.options.airport_keys.push('katowice-pyrzowice');
+  malformed.push(duplicateAirport);
+  const invalidOptions = pricingFixtureRankTwo();
+  invalidOptions.options.durations_days = '2';
+  malformed.push(invalidOptions);
+  const mismatchedKey = pricingFixtureRankTwo();
+  mismatchedKey.scenarios[0].key = 'katowice-pyrzowice:2026-09-11:2';
+  malformed.push(mismatchedKey);
+  const outsideMatrix = pricingFixtureRankTwo();
+  outsideMatrix.scenarios[0].airport_key = 'krakow-balice';
+  outsideMatrix.scenarios[0].key = 'krakow-balice:2026-09-10:2';
+  malformed.push(outsideMatrix);
+  const duplicateScenario = pricingFixtureRankTwo();
+  duplicateScenario.scenarios.push({ ...duplicateScenario.scenarios[0], offers: [...duplicateScenario.scenarios[0].offers] });
+  malformed.push(duplicateScenario);
+  const invalidStatus = pricingFixtureRankTwo();
+  invalidStatus.scenarios[0].status = 'warning';
+  malformed.push(invalidStatus);
+  const invalidShape = pricingFixtureRankTwo();
+  invalidShape.scenarios[0].offers = {};
+  malformed.push(invalidShape);
+
+  for (const payload of malformed) {
+    assert.throws(() => buildPricingRecommendations(payload, { calibration: { approved: false } }), /Malformed canonical QEEQ/);
+  }
+});
+
+test('pricing CLI leaves no output for a malformed canonical matrix', t => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { main } = require('../src/qeeq/pricingRecommendations');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-pricing-invalid-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const input = path.join(directory, 'input.json');
+  const config = path.join(directory, 'rules.json');
+  const calibration = path.join(directory, 'calibration.json');
+  const output = path.join(directory, 'output.json');
+  const payload = pricingFixtureRankTwo();
+  payload.options.start_dates.push('2026-09-10');
+  fs.writeFileSync(input, JSON.stringify(payload));
+  fs.writeFileSync(config, JSON.stringify({ pricing: {} }));
+  fs.writeFileSync(calibration, JSON.stringify({ approved: false }));
+
+  assert.throws(() => main([input, output, `--config=${config}`, `--calibration=${calibration}`]), /Malformed canonical QEEQ/);
+  assert.equal(fs.existsSync(output), false);
+});
+
+test('pricing rejects a malformed canonical offer before decision or CLI output', t => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { buildPricingRecommendations, main } = require('../src/qeeq/pricingRecommendations');
+  const payload = pricingFixtureRankTwo();
+  payload.scenarios[0].offers.push(42);
+  const approved = { approved: true, minMultiplier: 1, maxMultiplier: 1.2, defaultMultiplier: 1.1 };
+  assert.throws(() => buildPricingRecommendations(payload, { calibration: approved }), /Malformed canonical QEEQ offer/);
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-pricing-offer-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const input = path.join(directory, 'input.json');
+  const config = path.join(directory, 'rules.json');
+  const calibration = path.join(directory, 'calibration.json');
+  const output = path.join(directory, 'output.json');
+  fs.writeFileSync(input, JSON.stringify(payload));
+  fs.writeFileSync(config, JSON.stringify({ pricing: {} }));
+  fs.writeFileSync(calibration, JSON.stringify(approved));
+  assert.throws(() => main([input, output, `--config=${config}`, `--calibration=${calibration}`]), /Malformed canonical QEEQ offer/);
+  assert.equal(fs.existsSync(output), false);
+});
+
+test('pricing recommendation order and counts are deterministic', () => {
+  const { buildPricingRecommendations } = require('../src/qeeq/pricingRecommendations');
+  const payload = pricingFixtureRankTwo();
+  payload.options.start_dates = ['2026-09-10', '2026-09-09'];
+  payload.scenarios = [
+    payload.scenarios[0],
+    pricingScenario({
+      key: 'katowice-pyrzowice:2026-09-09:2', pickupDate: '2026-09-09',
+      offers: [pricingOffer('Ace', 100), pricingOffer('MM Cars Rental', 105)]
+    })
+  ];
+  const options = { calibration: { approved: false } };
+  const first = buildPricingRecommendations(payload, options);
+  const second = buildPricingRecommendations({ ...payload, scenarios: [...payload.scenarios].reverse() }, options);
+  assert.deepEqual(first, second);
+  assert.deepEqual(first.decisions.map(item => item.pickup_date), ['2026-09-09', '2026-09-10']);
+  assert.deepEqual(first.counts, {
+    decision_count: 2, site_recommendation_count: 2, import_recommendation_count: 0,
+    increase_count: 0, decrease_count: 2, hold_count: 0, review_count: 0
+  });
+});
+
+test('pricing CLI validates inputs and writes recommendations atomically', t => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { buildPricingRecommendations, main } = require('../src/qeeq/pricingRecommendations');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-pricing-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const input = path.join(directory, 'input.json');
+  const config = path.join(directory, 'rules.json');
+  const calibration = path.join(directory, 'calibration.json');
+  const output = path.join(directory, 'output.json');
+  fs.writeFileSync(input, JSON.stringify(pricingFixtureRankTwo()));
+  fs.writeFileSync(config, JSON.stringify({ pricing: { top1GapThresholdPlnDay: 10 } }));
+  fs.writeFileSync(calibration, JSON.stringify({ approved: false }));
+
+  assert.throws(() => main([input, output, `--config=${config}`, `--calibration=${calibration}`, '--bogus=yes']), /Unknown option/);
+  assert.equal(fs.existsSync(output), false);
+  assert.throws(() => main([input, input, `--config=${config}`, `--calibration=${calibration}`]), /cannot overwrite/);
+  assert.throws(() => main([input, output, `--config=${directory}`, `--calibration=${calibration}`]), /regular file/);
+  assert.equal(fs.existsSync(output), false);
+  fs.writeFileSync(config, JSON.stringify({ pricing: { minChangePlnDay: null } }));
+  assert.throws(() => main([input, output, `--config=${config}`, `--calibration=${calibration}`]), /must be finite/);
+  assert.equal(fs.existsSync(output), false);
+  fs.writeFileSync(config, JSON.stringify({ pricing: {} }));
+  fs.writeFileSync(input, JSON.stringify({ provider: 'qeeq.pl', scenarios: [] }));
+  assert.throws(() => main([input, output, `--config=${config}`, `--calibration=${calibration}`]), /Malformed canonical/);
+  assert.equal(fs.existsSync(output), false);
+
+  fs.writeFileSync(input, JSON.stringify(pricingFixtureRankTwo()));
+  assert.equal(main([input, output, `--config=${config}`, `--calibration=${calibration}`]), 0);
+  assert.deepEqual(JSON.parse(fs.readFileSync(output, 'utf8')),
+    buildPricingRecommendations(pricingFixtureRankTwo(), { rules: {}, calibration: { approved: false } }));
+});
+
+async function createSyntheticQeeqTariffFixture() {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const ExcelJS = require('exceljs');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'qeeq-excel-updater-'));
+  const baselinePath = path.join(directory, 'baseline.xlsx');
+  const recommendationsPath = path.join(directory, 'recommendations.json');
+  const configPath = path.join(directory, 'layout.json');
+  const outputPath = path.join(directory, 'import.xlsx');
+  const summaryPath = path.join(directory, 'summary.json');
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Sheet1');
+  workbook.addWorksheet('Notes').getCell('A1').value = 'Unrelated sheet';
+  sheet.mergeCells('A1:C1');
+  sheet.getCell('A1').value = 'Synthetic tariff';
+  sheet.getCell('I2').value = 2;
+  sheet.getCell('I3').value = 3;
+  sheet.getCell('J2').value = 4;
+  sheet.getCell('J3').value = 7;
+  ['Group', 'Name', 'Unused', 'Zone', 'Unused 2', 'Unused 3', 'Pickup start', 'Unused 4', '2-3 days', '4-7 days', 'Formula']
+    .forEach((value, index) => { sheet.getRow(4).getCell(index + 1).value = value; });
+  const rows = [
+    ['CDMR', 'Katowice', null, 'KALO', null, null, new Date(Date.UTC(2026, 8, 10)), null, 70, 80],
+    ['CDMR', 'Warsaw', null, 'WALO', null, null, '2026-09-10', null, 70, 80],
+    ['CGAV', 'Excluded', null, 'KALO', null, null, '2026-09-10', null, 60, 65],
+    ['EDMV', 'Adjusted', null, 'KALO', null, null, '2026-09-11', null, 75, 85],
+    ['CDMR', 'Other date', null, 'KALO', null, null, '2026-09-12', null, 77, 87]
+  ];
+  rows.forEach((values, index) => {
+    values.forEach((value, column) => { sheet.getRow(index + 5).getCell(column + 1).value = value; });
+  });
+  sheet.getCell('K5').value = { formula: 'I5+J5', result: 150 };
+  sheet.getCell('K5').font = { italic: true, color: { argb: 'FF654321' } };
+  sheet.getCell('K5').numFmt = '0.0';
+  sheet.getCell('I5').style = {
+    font: { bold: true, color: { argb: 'FF123456' } },
+    fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFF00' } },
+    border: { bottom: { style: 'thin', color: { argb: 'FF000000' } } },
+    alignment: { horizontal: 'center' },
+    numFmt: '0.00'
+  };
+  sheet.getColumn(1).width = 14;
+  sheet.getColumn(9).width = 18;
+  sheet.getRow(5).height = 25;
+  sheet.views = [{ state: 'frozen', xSplit: 1, ySplit: 4, topLeftCell: 'B5', activeCell: 'I5' }];
+  sheet.autoFilter = 'A4:K9';
+  sheet.pageSetup = { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, paperSize: 9 };
+  await workbook.xlsx.writeFile(baselinePath);
+  const decisions = [
+    {
+      scenario_key: 'katowice-pyrzowice:2026-09-10:2', airport_key: 'katowice-pyrzowice',
+      tariff_zones: ['KALO'], pickup_date: '2026-09-10', rental_days: 2,
+      calibration_status: 'approved', import_action: 'increase', suggested_rate_pln_day: 90,
+      data_quality_status: 'complete'
+    },
+    {
+      scenario_key: 'warsaw-chopin:2026-09-10:2', airport_key: 'warsaw-chopin',
+      tariff_zones: ['WALO'], pickup_date: '2026-09-10', rental_days: 2,
+      calibration_status: 'unapproved', import_action: 'review', suggested_rate_pln_day: null,
+      data_quality_status: 'complete'
+    },
+    {
+      scenario_key: 'warsaw-modlin:2026-09-10:2', airport_key: 'warsaw-modlin',
+      tariff_zones: [], pickup_date: '2026-09-10', rental_days: 2,
+      calibration_status: 'approved', import_action: 'review', suggested_rate_pln_day: null,
+      data_quality_status: 'unmapped_tariff_zone'
+    }
+  ];
+  fs.writeFileSync(recommendationsPath, JSON.stringify({
+    schema_version: 1, provider: 'qeeq.pl', decisions, import_recommendations: [decisions[0]]
+  }));
+  fs.writeFileSync(configPath, JSON.stringify({
+    worksheet: 'Sheet1', headerRow: 4, dataStartRow: 5, durationMinRow: 2, durationMaxRow: 3,
+    columns: { group: 1, zone: 4, pickupStartDate: 7, rateStart: 9 },
+    excludedGroups: ['CGAV', 'FVMD', 'SWAV'], groupRateAdjustmentsPlnDay: { EDMV: 1 },
+    minExcelChangePlnDay: 0.01
+  }));
+  return { directory, baselinePath, recommendationsPath, configPath, outputPath, summaryPath };
+}
+
+test('Excel updater changes only authorized mapped cells and preserves the baseline', async t => {
+  const fs = require('node:fs');
+  const ExcelJS = require('exceljs');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const before = fs.readFileSync(fixture.baselinePath);
+  const summary = await generateImportWorkbook({
+    workbookPath: fixture.baselinePath,
+    recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath,
+    outputPath: fixture.outputPath,
+    summaryPath: fixture.summaryPath
+  });
+  assert.deepEqual(fs.readFileSync(fixture.baselinePath), before);
+  assert.equal(summary.applied_count, 1);
+  assert.equal(summary.review_count, 2);
+  assert.equal(summary.unmapped_count, 1);
+  assert.deepEqual(summary.changed_cells, [{ cell: 'I5', old_rate_pln_day: 70, new_rate_pln_day: 90 }]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(fixture.summaryPath, 'utf8')), summary);
+  const output = new ExcelJS.Workbook();
+  await output.xlsx.readFile(fixture.outputPath);
+  assert.deepEqual(output.worksheets.map(sheet => sheet.name), ['Sheet1']);
+  assert.equal(output.getWorksheet('Sheet1').getCell('I5').value, 90);
+  assert.equal(output.getWorksheet('Sheet1').getCell('I6').value, 70);
+  assert.equal(output.getWorksheet('Sheet1').getCell('I7').value, 60);
+  assert.equal(output.getWorksheet('Sheet1').getCell('K5').formula, 'I5+J5');
+});
+
+test('Excel updater selects duration bands, applies group adjustments, and counts excluded or unmatched items', async t => {
+  const fs = require('node:fs');
+  const ExcelJS = require('exceljs');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const payload = JSON.parse(fs.readFileSync(fixture.recommendationsPath, 'utf8'));
+  const additions = [
+    {
+      scenario_key: 'katowice-pyrzowice:2026-09-11:5', tariff_zones: ['KALO'], pickup_date: '2026-09-11', rental_days: 5,
+      calibration_status: 'approved', import_action: 'decrease', suggested_rate_pln_day: 50, data_quality_status: 'complete'
+    },
+    {
+      scenario_key: 'katowice-pyrzowice:2026-09-13:2', tariff_zones: ['KALO'], pickup_date: '2026-09-13', rental_days: 2,
+      calibration_status: 'approved', import_action: 'increase', suggested_rate_pln_day: 99, data_quality_status: 'complete'
+    }
+  ];
+  payload.decisions.push(...additions);
+  payload.import_recommendations.push(...additions);
+  fs.writeFileSync(fixture.recommendationsPath, JSON.stringify(payload));
+  const summary = await generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+  });
+  const output = new ExcelJS.Workbook();
+  await output.xlsx.readFile(fixture.outputPath);
+  const sheet = output.getWorksheet('Sheet1');
+  assert.equal(sheet.getCell('J8').value, 51);
+  assert.equal(sheet.getCell('I7').value, 60);
+  assert.equal(summary.applied_count, 2);
+  assert.equal(summary.skipped_count, 1);
+  assert.equal(summary.unmatched_count, 1);
+});
+
+test('Excel updater applies a present tariff zone and reports each absent zone target once', async t => {
+  const fs = require('node:fs');
+  const ExcelJS = require('exceljs');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const baseline = new ExcelJS.Workbook();
+  await baseline.xlsx.readFile(fixture.baselinePath);
+  baseline.getWorksheet('Sheet1').getCell('D6').value = 'KRLO';
+  await baseline.xlsx.writeFile(fixture.baselinePath);
+  const recommendation = {
+    scenario_key: 'krakow-balice:2026-09-10:2', airport_key: 'krakow-balice',
+    tariff_zones: ['KRLO', 'KRTI'], pickup_date: '2026-09-10', rental_days: 2,
+    calibration_status: 'approved', import_action: 'increase', suggested_rate_pln_day: 92,
+    data_quality_status: 'complete'
+  };
+  fs.writeFileSync(fixture.recommendationsPath, JSON.stringify({
+    schema_version: 1, provider: 'qeeq.pl', decisions: [recommendation], import_recommendations: [recommendation]
+  }));
+
+  const summary = await generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+  });
+  const output = new ExcelJS.Workbook();
+  await output.xlsx.readFile(fixture.outputPath);
+  assert.equal(output.getWorksheet('Sheet1').getCell('I6').value, 92);
+  assert.equal(summary.applied_count, 1);
+  assert.equal(summary.unmatched_count, 1);
+  assert.deepEqual(summary.unmatched_targets, [
+    { tariff_zone: 'KRTI', pickup_date: '2026-09-10', rental_days: 2 }
+  ]);
+});
+
+test('Excel updater preserves formulas, styles, dimensions, and merged cells', async t => {
+  const fs = require('node:fs');
+  const ExcelJS = require('exceljs');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  await generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+  });
+  const output = new ExcelJS.Workbook();
+  await output.xlsx.readFile(fixture.outputPath);
+  const sheet = output.getWorksheet('Sheet1');
+  assert.equal(sheet.getCell('K5').formula, 'I5+J5');
+  assert.deepEqual(sheet.getCell('I5').font, { bold: true, color: { argb: 'FF123456' } });
+  assert.equal(sheet.getCell('I5').fill.fgColor.argb, 'FFFFFF00');
+  assert.equal(sheet.getCell('I5').border.bottom.style, 'thin');
+  assert.equal(sheet.getCell('I5').alignment.horizontal, 'center');
+  assert.equal(sheet.getCell('I5').numFmt, '0.00');
+  assert.equal(sheet.getColumn(1).width, 14);
+  assert.equal(sheet.getColumn(9).width, 18);
+  assert.equal(sheet.getRow(5).height, 25);
+  assert.equal(sheet.getCell('A1').isMerged, true);
+  assert.equal(sheet.getCell('C1').master.address, 'A1');
+  assert.equal(sheet.views[0].state, 'frozen');
+  assert.equal(sheet.views[0].xSplit, 1);
+  assert.equal(sheet.views[0].ySplit, 4);
+  assert.equal(sheet.autoFilter, 'A4:K9');
+  assert.equal(sheet.pageSetup.orientation, 'landscape');
+  assert.equal(sheet.pageSetup.fitToPage, true);
+  assert.equal(sheet.pageSetup.fitToWidth, 1);
+  assert.equal(sheet.pageSetup.fitToHeight, 0);
+});
+
+test('Excel updater requests full recalculation and clears stale formula results after a rate edit', async t => {
+  const fs = require('node:fs');
+  const JSZip = require('jszip');
+  const ExcelJS = require('exceljs');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  await generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+  });
+
+  const output = new ExcelJS.Workbook();
+  await output.xlsx.readFile(fixture.outputPath);
+  const formulaCell = output.getWorksheet('Sheet1').getCell('K5');
+  assert.equal(formulaCell.formula, 'I5+J5');
+  assert.equal(formulaCell.result, undefined);
+  assert.deepEqual(formulaCell.font, { italic: true, color: { argb: 'FF654321' } });
+  assert.equal(formulaCell.numFmt, '0.0');
+
+  const archive = await JSZip.loadAsync(fs.readFileSync(fixture.outputPath));
+  const workbookXml = await archive.file('xl/workbook.xml').async('string');
+  const sheetXml = await archive.file('xl/worksheets/sheet1.xml').async('string');
+  assert.match(workbookXml, /<calcPr\b[^>]*\bfullCalcOnLoad="1"/);
+  assert.match(sheetXml, /<c r="K5"[^>]*><f>I5\+J5<\/f><\/c>/);
+});
+
+test('Excel updater rejects path collisions and invalid active recommendations before output', async t => {
+  const fs = require('node:fs');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  await assert.rejects(() => generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: fixture.baselinePath, summaryPath: fixture.summaryPath
+  }), /paths must be distinct/i);
+  assert.equal(fs.existsSync(fixture.summaryPath), false);
+  const payload = JSON.parse(fs.readFileSync(fixture.recommendationsPath, 'utf8'));
+  payload.import_recommendations[0].suggested_rate_pln_day = null;
+  fs.writeFileSync(fixture.recommendationsPath, JSON.stringify(payload));
+  await assert.rejects(() => generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+  }), /approved finite positive/i);
+  assert.equal(fs.existsSync(fixture.outputPath), false);
+  assert.equal(fs.existsSync(fixture.summaryPath), false);
+});
+
+test('Excel updater rejects a source-output collision reached through a directory junction alias', async t => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  const alias = path.join(os.tmpdir(), `${path.basename(fixture.directory)}-junction`);
+  fs.symlinkSync(fixture.directory, alias, 'junction');
+  t.after(() => {
+    if (fs.existsSync(alias)) {
+      const stat = fs.lstatSync(alias);
+      if (stat.isSymbolicLink()) fs.unlinkSync(alias);
+      else fs.rmdirSync(alias);
+    }
+    fs.rmSync(fixture.directory, { recursive: true, force: true });
+  });
+  await assert.rejects(() => generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: path.join(alias, 'baseline.xlsx'), summaryPath: fixture.summaryPath
+  }), /paths must be distinct/i);
+  assert.equal(fs.existsSync(fixture.summaryPath), false);
+});
+
+test('Excel updater rejects a symbolic-link input file when the platform permits creating one', async t => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const alias = path.join(fixture.directory, 'recommendations-link.json');
+  try {
+    fs.symlinkSync(fixture.recommendationsPath, alias, 'file');
+  } catch (error) {
+    t.diagnostic(`symbolic-link creation unavailable: ${error.code || error.message}`);
+    t.skip('platform does not permit creating a file symbolic link in the temporary directory');
+    return;
+  }
+  await assert.rejects(() => generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: alias,
+    configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+  }), /regular file/i);
+  assert.equal(fs.existsSync(fixture.outputPath), false);
+});
+
+test('Excel updater rejects duplicate recommendation keys and leaves review items untouched', async t => {
+  const fs = require('node:fs');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const payload = JSON.parse(fs.readFileSync(fixture.recommendationsPath, 'utf8'));
+  payload.import_recommendations.push({ ...payload.import_recommendations[0], scenario_key: 'duplicate' });
+  fs.writeFileSync(fixture.recommendationsPath, JSON.stringify(payload));
+  await assert.rejects(() => generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+  }), /duplicate recommendation key/i);
+  assert.equal(fs.existsSync(fixture.outputPath), false);
+});
+
+test('Excel updater rejects formula-like unmatched target text before writing a summary', async t => {
+  const fs = require('node:fs');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  const payload = JSON.parse(fs.readFileSync(fixture.recommendationsPath, 'utf8'));
+  payload.decisions[0].tariff_zones = ['=2+2'];
+  payload.import_recommendations[0].tariff_zones = ['=2+2'];
+  fs.writeFileSync(fixture.recommendationsPath, JSON.stringify(payload));
+  await assert.rejects(() => generateImportWorkbook({
+    workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+    configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+  }), /approved finite positive rate and mapped inputs/i);
+  assert.equal(fs.existsSync(fixture.outputPath), false);
+  assert.equal(fs.existsSync(fixture.summaryPath), false);
+});
+
+test('Excel updater atomic rename failure preserves an existing output and removes temporary files', async t => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  fs.writeFileSync(fixture.outputPath, 'existing valid output');
+  const originalRename = fs.renameSync;
+  fs.renameSync = (source, target) => {
+    if (path.resolve(target) === path.resolve(fixture.outputPath)) throw new Error('simulated output rename failure');
+    return originalRename(source, target);
+  };
+  try {
+    await assert.rejects(() => generateImportWorkbook({
+      workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+      configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+    }), /simulated output rename failure/);
+  } finally {
+    fs.renameSync = originalRename;
+  }
+  assert.equal(fs.readFileSync(fixture.outputPath, 'utf8'), 'existing valid output');
+  assert.equal(fs.existsSync(fixture.summaryPath), false);
+  assert.deepEqual(fs.readdirSync(fixture.directory).filter(name => name.includes('.tmp')), []);
+});
+
+test('Excel updater summary rename failure preserves an existing summary and removes temporary JSON', async t => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { generateImportWorkbook } = require('../src/qeeq/updateExcelRates');
+  const fixture = await createSyntheticQeeqTariffFixture();
+  t.after(() => fs.rmSync(fixture.directory, { recursive: true, force: true }));
+  fs.writeFileSync(fixture.summaryPath, '{"existing":true}\n');
+  const originalRename = fs.renameSync;
+  fs.renameSync = (source, target) => {
+    if (path.resolve(target) === path.resolve(fixture.summaryPath)) throw new Error('simulated summary rename failure');
+    return originalRename(source, target);
+  };
+  try {
+    await assert.rejects(() => generateImportWorkbook({
+      workbookPath: fixture.baselinePath, recommendationsPath: fixture.recommendationsPath,
+      configPath: fixture.configPath, outputPath: fixture.outputPath, summaryPath: fixture.summaryPath
+    }), /simulated summary rename failure/);
+  } finally {
+    fs.renameSync = originalRename;
+  }
+  assert.equal(fs.readFileSync(fixture.summaryPath, 'utf8'), '{"existing":true}\n');
+  assert.deepEqual(fs.readdirSync(fixture.directory).filter(name => name.endsWith('.tmp.json')), []);
 });

@@ -3,6 +3,10 @@ output/
 artifacts/
 downloaded-parts/
 .playwright-cli/
+.worktrees/
 .env
 *.log
 *.tmp
+input/qeeq-rate-baseline.xlsx
+output/qeeq-rates-import-ready.xlsx
+output/qeeq-rate-update-summary.json

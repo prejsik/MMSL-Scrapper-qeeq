@@ -1,13 +1,13 @@
 [
   {"city":"Warszawa","airports":[
-    {"key":"warsaw-chopin","label":"Lotnisko Chopina w Warszawie","iata":"WAW","cityId":"2486","landmarkId":"98942","dataType":"airport","type":"2"},
-    {"key":"warsaw-modlin","label":"Lotnisko Warszawa Modlin","iata":"WMI","cityId":"2486","landmarkId":"99522","dataType":"airport","type":"2"}
+    {"key":"warsaw-chopin","label":"Lotnisko Chopina w Warszawie","iata":"WAW","cityId":"2486","landmarkId":"98942","dataType":"airport","type":"2","tariffZones":["WALO"]},
+    {"key":"warsaw-modlin","label":"Lotnisko Warszawa Modlin","iata":"WMI","cityId":"2486","landmarkId":"99522","dataType":"airport","type":"2","tariffZones":[]}
   ]},
-  {"city":"Krakow","airports":[{"key":"krakow-balice","label":"Lotnisko w Krakowie","iata":"KRK","cityId":"2479","landmarkId":"98939","dataType":"airport","type":"2"}]},
-  {"city":"Gdansk","airports":[{"key":"gdansk-rebiechowo","label":"Lotnisko Gdańsk","iata":"GDN","cityId":"2475","landmarkId":"99177","dataType":"airport","type":"2"}]},
-  {"city":"Katowice","airports":[{"key":"katowice-pyrzowice","label":"Port Lotniczy Katowice-Pyrzowice","iata":"KTW","cityId":"2477","landmarkId":"404260","dataType":"airport","type":"2"}]},
-  {"city":"Wroclaw","airports":[{"key":"wroclaw-strachowice","label":"Lotnisko we Wrocławiu","iata":"WRO","cityId":"2487","landmarkId":"98954","dataType":"airport","type":"2"}]},
-  {"city":"Poznan","airports":[{"key":"poznan-lawica","label":"Lotnisko Poznań","iata":"POZ","cityId":"2483","landmarkId":"99001","dataType":"airport","type":"2"}]},
-  {"city":"Bydgoszcz","airports":[{"key":"bydgoszcz-szwederowo","label":"Port Lotniczy Bydgoszcz","iata":"BZG","cityId":"2474","landmarkId":"98976","dataType":"airport","type":"2"}]},
-  {"city":"Lodz","airports":[{"key":"lodz-lublinek","label":"Port Lotniczy Łódź","iata":"LCJ","cityId":"2480","landmarkId":"98993","dataType":"airport","type":"2"}]}
+  {"city":"Krakow","airports":[{"key":"krakow-balice","label":"Lotnisko w Krakowie","iata":"KRK","cityId":"2479","landmarkId":"98939","dataType":"airport","type":"2","tariffZones":["KRLO","KRTI"]}]},
+  {"city":"Gdansk","airports":[{"key":"gdansk-rebiechowo","label":"Lotnisko Gdańsk","iata":"GDN","cityId":"2475","landmarkId":"99177","dataType":"airport","type":"2","tariffZones":["GDLO"]}]},
+  {"city":"Katowice","airports":[{"key":"katowice-pyrzowice","label":"Port Lotniczy Katowice-Pyrzowice","iata":"KTW","cityId":"2477","landmarkId":"404260","dataType":"airport","type":"2","tariffZones":["KALO"]}]},
+  {"city":"Wroclaw","airports":[{"key":"wroclaw-strachowice","label":"Lotnisko we Wrocławiu","iata":"WRO","cityId":"2487","landmarkId":"98954","dataType":"airport","type":"2","tariffZones":["WRLO"]}]},
+  {"city":"Poznan","airports":[{"key":"poznan-lawica","label":"Lotnisko Poznań","iata":"POZ","cityId":"2483","landmarkId":"99001","dataType":"airport","type":"2","tariffZones":["POLO"]}]},
+  {"city":"Bydgoszcz","airports":[{"key":"bydgoszcz-szwederowo","label":"Port Lotniczy Bydgoszcz","iata":"BZG","cityId":"2474","landmarkId":"98976","dataType":"airport","type":"2","tariffZones":["BYLO"]}]},
+  {"city":"Lodz","airports":[{"key":"lodz-lublinek","label":"Port Lotniczy Łódź","iata":"LCJ","cityId":"2480","landmarkId":"98993","dataType":"airport","type":"2","tariffZones":["LOLO"]}]}
 ]

@@ -1,6 +1,6 @@
 # QEEQ scraper
 
-Standalone Node.js 20 scraper for `https://www.qeeq.pl`. It validates the current visible airport autocomplete, runs bounded car-rental searches in a real browser, keeps conditional prices separate from public prices, and produces canonical JSON, CSV, HTML, XLSX, quality, and manifest outputs.
+Standalone Node.js 20 scraper for `https://www.qeeq.pl`. It validates the current visible airport autocomplete, runs bounded car-rental searches in a real browser, keeps conditional prices separate from public prices, and produces canonical JSON, CSV, HTML, XLSX, pricing-recommendation, quality, and manifest outputs.
 
 The checked-in defaults are deliberately limited to Katowice (KTW), the next pickup date, and a two-day rental. The 7,020-scenario schedule is disabled until its independent repository gates are explicitly enabled from measured evidence.
 
@@ -40,6 +40,8 @@ node src/qeeq/reportHtml.js output/qeeq-smoke.json output/qeeq-smoke.html
 node src/qeeq/reportXlsx.js output/qeeq-smoke.json output/qeeq-smoke.xlsx
 ```
 
+Top 3 ranks the cheapest verified public offer from each distinct normalized provider, so several cars from one supplier cannot occupy multiple places. HTML and XLSX also show MM Cars Rental separately with its provider rank and the number of cheaper providers. Date-level MM evidence uses two different labels: `Brak MM - pelne dane` means the complete planned airport-duration matrix contains no verified MM offer, while `Nie mozna potwierdzic - niepelne dane` means at least one planned check is missing, failed, duplicated, or lacks a verified public offer.
+
 Confirm that the run is complete and contains a verified public PLN offer:
 
 ```powershell
@@ -58,7 +60,9 @@ This project does not authorize a push, workflow dispatch, full-matrix run, Page
 | `npm.cmd run qeeq:merge -- [options]` | Merge chunk JSON below `downloaded-parts` into `output/qeeq-results-latest.json` and `output/qeeq-results.csv`; the workflow also supplies an authoritative expected-keys file. |
 | `npm.cmd run qeeq:report` | Generate self-contained `output/qeeq-report.html` from canonical merged JSON. |
 | `npm.cmd run qeeq:xlsx` | Generate `output/qeeq-summary.xlsx` from canonical merged JSON. |
-| `npm.cmd run qeeq:aux` | Generate `output/quality-summary.json` and `output/run-manifest.json` after all four main merged outputs exist. |
+| `npm.cmd run qeeq:recommend` | Generate `output/qeeq-pricing-recommendations.json` using the checked-in pricing rules and calibration gate. |
+| `npm.cmd run qeeq:excel -- [options]` | Generate a new import workbook from an explicitly named local baseline and recommendations; never edits the baseline in place. |
+| `npm.cmd run qeeq:aux` | Generate `output/quality-summary.json` and `output/run-manifest.json` after the canonical, CSV, HTML, XLSX, and recommendation outputs exist. |
 | `npm.cmd run qeeq:plan -- [options]` | Validate the requested workload and calculate the GitHub Actions chunk plan; it does not scrape. |
 
 Inspect the supported CLI syntax without starting a browser:
@@ -70,6 +74,8 @@ node src/qeeq/workflowPlan.js --help
 node src/qeeq/mergeResults.js --help
 node src/qeeq/report.js --help
 node src/qeeq/telegramSummary.js --help
+node src/qeeq/pricingRecommendations.js --help
+node src/qeeq/updateExcelRates.js --help
 ```
 
 `validateLocations.js` has no help-only mode. Use the complete validator command in **Safe local run**; invoking it opens a browser and performs the nine-location autocomplete validation.
@@ -136,14 +142,35 @@ Public ranking requires all of the following:
 
 Conditional prices are retained only in separate conditional fields and are verified only with a positive finite total and explicit `PLN` currency. `newcomer_coupon`, Diamond/member, login-only, and other conditional totals never become `total_price` and never enter Top 3. A crossed-out reference amount, deposit, rating, or discount percentage is not a payable price. Deposit and reference price retain their own currencies (`deposit_currency` and `reference_currency`); a foreign auxiliary currency remains visible but raises `unexpected_currency`. Daily price is derived only from an explicitly scoped verified total, or vice versa when the daily scope is explicit.
 
+## Pricing recommendations and manual Excel import
+
+Generate site-level pricing decisions from an existing canonical result without starting a browser:
+
+```powershell
+npm.cmd run qeeq:recommend
+```
+
+`qeeq-pricing-rules.config.example.json` controls the QEEQ site-level thresholds. `qeeq-rate-calibration.config.example.json` converts a site target into an import rate only when the file has `approved: true` and the selected positive multiplier is within its configured range. Resolution is airport-and-duration, airport, duration, then global default. The committed example is deliberately unapproved, so `suggested_rate_pln_day` stays `null` and any active site action has `import_action: "review"`; there is no DiscoverCars multiplier fallback.
+
+Warsaw Modlin (`WMI`) intentionally has no tariff-zone mapping and remains `data_quality_status: "unmapped_tariff_zone"` for manual review. The other supported airports use their explicit QEEQ tariff zones.
+
+Excel generation is local and manual. Supply an existing baseline path explicitly and write to a different output path:
+
+```powershell
+npm.cmd run qeeq:excel -- --workbook=input/qeeq-rate-baseline.xlsx --recommendations=output/qeeq-pricing-recommendations.json --config=qeeq-excel-rate-update.config.example.json --output=output/qeeq-rates-import-ready.xlsx --summary=output/qeeq-rate-update-summary.json
+```
+
+The updater never searches for a baseline and never modifies it in place. Only mapped, matched `increase` or `decrease` decisions with approved calibration and finite rates can change cells; configured excluded vehicle groups remain unchanged. Do not upload or commit the baseline or generated workbook. GitHub Actions generates recommendation JSON only and never runs the Excel updater.
+
 ## Outputs and statuses
 
 | Output | Contract |
 |---|---|
 | `qeeq-results-latest.json` | Canonical schema-v1 result: options, scenario identities and times, offers, sanitized error codes, independent run/data-quality status, and counts. A bounded smoke can use `qeeq-smoke.json` instead. |
 | `qeeq-results.csv` | Stable UTF-8 flattened provider-offer rows; formulas are neutralized and groups/business keys are excluded. |
-| `qeeq-report.html` | Self-contained filterable report with a status banner, per-scenario public Top 3, and separate conditional/detail fields. |
-| `qeeq-summary.xlsx` | Seven sheets: `Overview`, `Top 3`, `By airport`, `By duration`, `Providers`, `Details`, and `Data quality`. |
+| `qeeq-report.html` | Self-contained filterable report with a status banner, distinct-provider Top 3, a dedicated MM section, and separate conditional/detail fields. |
+| `qeeq-summary.xlsx` | Eight sheets: `Overview`, `Top 3`, `By airport`, `By duration`, `Providers`, `Details`, `MM Cars Rental`, and `Data quality`. |
+| `qeeq-pricing-recommendations.json` | Deterministic site decisions, calibration state, import actions, tariff mapping, and recommendation counts. |
 | `quality-summary.json` | Compact independent run/quality statuses, check counts, verified/unverified offer counts, and sanitized error-code counts. |
 | `run-manifest.json` | Completion status plus relative file names, byte sizes, and SHA-256 hashes for generated outputs. |
 
@@ -189,7 +216,7 @@ Manual `workflow_dispatch` defaults remain one KTW/two-day scenario with paralle
 
 ## Artifacts, Pages, and Telegram
 
-The daily workflow retains planning and chunk diagnostics for 7 days and merged reports for 30 days. If `QEEQ_PAGES_ENABLED=true` and all merged outputs exist, Pages publishes the self-contained report and JSON/CSV/XLSX downloads. Only the Pages job receives `pages: write` and `id-token: write`; all other jobs retain read-only repository permissions. If Pages is disabled or unavailable, the Telegram summary uses the merged GitHub Actions artifact/run link instead.
+The daily workflow retains planning and chunk diagnostics for 7 days and merged reports for 30 days. If `QEEQ_PAGES_ENABLED=true` and all merged outputs exist, Pages publishes the self-contained report and JSON/CSV/XLSX/recommendation downloads. Only the Pages job receives `pages: write` and `id-token: write`; all other jobs retain read-only repository permissions. If Pages is disabled or unavailable, the Telegram summary uses the merged GitHub Actions artifact/run link instead. Telegram adds sanitized recommendation counts and the independently classified MM dates; it never receives an Excel workbook.
 
 Telegram delivery is performed only by the workflow, never by `telegramSummary.js`; that module only builds sanitized text. Its GitHub Actions secrets are:
 

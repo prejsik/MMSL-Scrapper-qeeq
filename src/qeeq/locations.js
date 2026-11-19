@@ -1,5 +1,15 @@
 const locationCatalog = require('./locations.json');
 
+for (const entry of locationCatalog) {
+  for (const airport of entry.airports) {
+    if (!Array.isArray(airport.tariffZones)
+      || airport.tariffZones.some(zone => typeof zone !== 'string' || !/^[A-Z0-9]+$/.test(zone))
+      || new Set(airport.tariffZones).size !== airport.tariffZones.length) {
+      throw new Error(`Invalid QEEQ tariff zones for ${airport.iata}`);
+    }
+  }
+}
+
 function normalizeLocationKey(value) {
   return String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }

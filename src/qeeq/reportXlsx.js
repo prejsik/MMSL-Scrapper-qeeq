@@ -2,9 +2,11 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const ExcelJS = require('exceljs');
-const { rankVerifiedPublicOffers, sanitizeDiagnosticText } = require('./utils');
+const { sanitizeDiagnosticText } = require('./utils');
+const { buildScenarioMarketView } = require('./marketView');
+const { classifyMmAvailability } = require('./mmAvailability');
 
-const SHEET_NAMES = ['Overview', 'Top 3', 'By airport', 'By duration', 'Providers', 'Details', 'Data quality'];
+const SHEET_NAMES = ['Overview', 'Top 3', 'By airport', 'By duration', 'Providers', 'Details', 'MM Cars Rental', 'Data quality'];
 const PLN_FORMAT = '#,##0.00 "PLN"';
 const NUMBER_FORMAT = '#,##0.00';
 const INTEGER_FORMAT = '#,##0';
@@ -160,8 +162,7 @@ function validPublicOffer(offer) {
 }
 
 function topRows(payload) {
-  return scenarioObjects(payload).flatMap(scenario => rankVerifiedPublicOffers(arrayOf(scenario.offers).filter(isPlainObject))
-    .slice(0, 3)
+  return scenarioObjects(payload).flatMap(scenario => buildScenarioMarketView(scenario).top_3_providers
     .map((offer, index) => ({
       'Scenario key': safeScenarioKey(scenario.key),
       Position: index + 1,
@@ -174,6 +175,30 @@ function topRows(payload) {
       'Public daily': finite(offer.daily_price),
       Currency: safeText(offer.currency)
     })));
+}
+
+function mmRows(payload) {
+  const root = isPlainObject(payload) ? payload : {};
+  const availabilityByDate = new Map(classifyMmAvailability(root).dates.map(item => [item.pickup_date, item.status]));
+  return scenarioObjects(root).map(scenario => {
+    const view = buildScenarioMarketView(scenario);
+    const offer = view.mm_cars_rental;
+    const pickupDate = typeof scenario.pickup_at === 'string' ? scenario.pickup_at.slice(0, 10) : '';
+    return {
+      'Scenario key': safeScenarioKey(scenario.key),
+      IATA: safeText(scenario.iata || scenario.airport_key),
+      'Pickup at': safeDate(scenario.pickup_at),
+      'Rental days': finite(scenario.rental_days),
+      Availability: availabilityByDate.get(pickupDate) || 'incomplete',
+      'Provider rank': finite(view.mm_provider_rank),
+      'Cheaper providers': finite(view.cheaper_provider_count),
+      Provider: safeText(offer?.provider_name),
+      Vehicle: safeText(offer?.vehicle_name),
+      'Public total': finite(offer?.total_price),
+      'Public daily': finite(offer?.daily_price),
+      Currency: safeText(offer?.currency)
+    };
+  });
 }
 
 function aggregateRows(payload, dimension, label) {
@@ -309,6 +334,10 @@ async function buildWorkbook(payload = {}) {
     'Public total': PLN_FORMAT, 'Public daily': PLN_FORMAT, 'Conditional offer total': PLN_FORMAT,
     'Conditional offer daily': PLN_FORMAT, 'Diamond/member total': PLN_FORMAT, 'Diamond/member daily': PLN_FORMAT,
     'Reference price': NUMBER_FORMAT
+  });
+  addObjectRows(workbook.addWorksheet('MM Cars Rental'), ['Scenario key', 'IATA', 'Pickup at', 'Rental days', 'Availability', 'Provider rank', 'Cheaper providers', 'Provider', 'Vehicle', 'Public total', 'Public daily', 'Currency'], mmRows(root), {
+    'Pickup at': DATE_FORMAT, 'Rental days': INTEGER_FORMAT, 'Provider rank': INTEGER_FORMAT, 'Cheaper providers': INTEGER_FORMAT,
+    'Public total': PLN_FORMAT, 'Public daily': PLN_FORMAT
   });
   const quality = workbook.addWorksheet('Data quality');
   const qualityRows = diagnosticRows(root);
