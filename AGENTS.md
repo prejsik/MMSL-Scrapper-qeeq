@@ -4,7 +4,9 @@ Ten plik czytają oba narzędzia; `CLAUDE.md` tylko go importuje. Repozytorium j
 
 ## Gałąź główna
 
-Gałąź główna tego repo to `codex/qeeq-tool`, nie `main`: od niej zakładaj gałęzie i do niej kieruj PR-y.
+Gałąź główna tego repo to `main` (do 22.11.2026 nazywała się `codex/qeeq-tool`): od niej zakładaj gałęzie i do niej kieruj PR-y.
+
+Starsza kopia na laptopie może nadal stać na `codex/qeeq-tool`. Przestaw ją raz: `git fetch origin; git branch -m codex/qeeq-tool main; git branch -u origin/main main; git remote set-head origin -a`.
 
 ## Automaty (stan 18.11.2026)
 
