@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const { classifyMmAvailability } = require('./mmAvailability');
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
 const BIDI_CONTROLS = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
@@ -90,7 +91,8 @@ function safeCodes(values) {
 }
 
 function safeHttpsUrl(value) {
-  if (typeof value !== 'string' || HAS_CONTROL_CHARACTER.test(value) || HAS_BIDI_CONTROL.test(value)) return null;
+  if (typeof value !== 'string' || [...value].length > 1000
+      || HAS_CONTROL_CHARACTER.test(value) || HAS_BIDI_CONTROL.test(value)) return null;
   try {
     const url = new URL(value);
     if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || url.hash || url.search) return null;
@@ -114,6 +116,67 @@ function linkLines(options) {
   return lines;
 }
 
+function recommendationLine(options) {
+  const safe = objectOrEmpty(options);
+  const recommendations = read(safe, 'recommendations');
+  if (!recommendations || typeof recommendations !== 'object' || Array.isArray(recommendations)) return null;
+  const root = objectOrEmpty(recommendations);
+  const nested = read(root, 'counts');
+  const counts = nested && typeof nested === 'object' && !Array.isArray(nested) ? objectOrEmpty(nested) : root;
+  return `Rekomendacje — decyzje: ${nonNegativeInteger(read(counts, 'decision_count'))}, site: ${nonNegativeInteger(read(counts, 'site_recommendation_count'))}, import: ${nonNegativeInteger(read(counts, 'import_recommendation_count'))} (zwiększ: ${nonNegativeInteger(read(counts, 'increase_count'))}, zmniejsz: ${nonNegativeInteger(read(counts, 'decrease_count'))}, hold: ${nonNegativeInteger(read(counts, 'hold_count'))}, review: ${nonNegativeInteger(read(counts, 'review_count'))})`;
+}
+
+function mmDateGroups(payload) {
+  const availability = classifyMmAvailability(payload);
+  const groups = [];
+  if (availability.confirmed_missing_dates.length) {
+    groups.push({ header: 'Brak MM - pelne dane', dates: availability.confirmed_missing_dates });
+  }
+  if (availability.incomplete_dates.length) {
+    groups.push({ header: 'Nie mozna potwierdzic - niepelne dane', dates: availability.incomplete_dates });
+  }
+  return groups;
+}
+
+function renderBoundedMmSections(groups, maximumCharacters) {
+  const shown = groups.map(() => 0);
+  const render = () => groups.map((group, index) => {
+    const lines = [group.header, ...group.dates.slice(0, shown[index]).map(date => `- ${date}`)];
+    const omitted = group.dates.length - shown[index];
+    if (omitted > 0) lines.push(`- ... pominięto: ${omitted}`);
+    return lines.join('\n');
+  }).join('\n');
+  let result = render();
+  if ([...result].length > maximumCharacters) throw new Error('Telegram MM section headers exceed the message limit');
+  let added;
+  do {
+    added = false;
+    for (let index = 0; index < groups.length; index += 1) {
+      if (shown[index] >= groups[index].dates.length) continue;
+      shown[index] += 1;
+      const candidate = render();
+      if ([...candidate].length <= maximumCharacters) {
+        result = candidate;
+        added = true;
+      } else {
+        shown[index] -= 1;
+      }
+    }
+  } while (added);
+  return result;
+}
+
+function boundedFinalMessage(lines, payload, options) {
+  const body = lines.join('\n');
+  const links = linkLines(options);
+  const suffix = links.length ? `\n${links.join('\n')}` : '';
+  const groups = mmDateGroups(payload);
+  if (!groups.length) return `${body}${suffix}`;
+  const mmBudget = 4096 - [...body].length - [...suffix].length - 1;
+  const mmSections = renderBoundedMmSections(groups, mmBudget);
+  return `${body}\n${mmSections}${suffix}`;
+}
+
 function buildFinalSummary(payload, options) {
   const root = objectOrEmpty(payload);
   const quality = objectOrEmpty(read(root, 'quality'));
@@ -132,7 +195,9 @@ function buildFinalSummary(payload, options) {
   ];
   if (failureCodes.length) lines.push(`Błędy: ${failureCodes.join(', ')}`);
   if (qualityCodes.length) lines.push(`Jakość — kody: ${qualityCodes.join(', ')}`);
-  return [...lines, ...linkLines(options)].join('\n');
+  const recommendations = recommendationLine(options);
+  if (recommendations) lines.push(recommendations);
+  return boundedFinalMessage(lines, root, options);
 }
 
 function buildPlanFailureSummary(error, options) {
@@ -150,6 +215,7 @@ function parseSummaryArgs(argv) {
 
   const names = {
     mode: 'mode', input: 'input', error: 'error',
+    recommendations: 'recommendations',
     'report-url': 'reportUrl', 'artifact-url': 'artifactUrl', 'run-url': 'runUrl'
   };
   const parsed = {};
@@ -170,7 +236,7 @@ function parseSummaryArgs(argv) {
   } else {
     if (!parsed.error) throw new Error('Missing required option: --error');
     if (parsed.input !== undefined) throw new Error('--input is only valid in final-summary mode');
-    if (parsed.reportUrl !== undefined || parsed.artifactUrl !== undefined) {
+    if (parsed.reportUrl !== undefined || parsed.artifactUrl !== undefined || parsed.recommendations !== undefined) {
       throw new Error('plan-failure mode accepts only --error and --run-url');
     }
   }
@@ -178,7 +244,7 @@ function parseSummaryArgs(argv) {
 }
 
 function usage() {
-  return 'Usage: node src/qeeq/telegramSummary.js --mode=final-summary --input=<canonical.json> [--report-url=<https-url>] [--artifact-url=<https-url>] [--run-url=<https-url>] | --mode=plan-failure --error=<message> [--run-url=<https-url>]';
+  return 'Usage: node src/qeeq/telegramSummary.js --mode=final-summary --input=<canonical.json> [--recommendations=<recommendations.json>] [--report-url=<https-url>] [--artifact-url=<https-url>] [--run-url=<https-url>] | --mode=plan-failure --error=<message> [--run-url=<https-url>]';
 }
 
 function main(argv = process.argv.slice(2)) {
@@ -187,7 +253,12 @@ function main(argv = process.argv.slice(2)) {
     process.stdout.write(`${usage()}\n`);
     return 0;
   }
-  const options = { reportUrl: args.reportUrl, artifactUrl: args.artifactUrl, runUrl: args.runUrl };
+  const options = {
+    reportUrl: args.reportUrl,
+    artifactUrl: args.artifactUrl,
+    runUrl: args.runUrl,
+    recommendations: args.recommendations ? JSON.parse(fs.readFileSync(args.recommendations, 'utf8')) : undefined
+  };
   const message = args.mode === 'final-summary'
     ? buildFinalSummary(JSON.parse(fs.readFileSync(args.input, 'utf8')), options)
     : buildPlanFailureSummary(args.error, options);

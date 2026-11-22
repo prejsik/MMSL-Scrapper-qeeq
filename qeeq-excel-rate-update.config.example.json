@@ -1,0 +1,18 @@
+{
+  "worksheet": "Sheet1",
+  "headerRow": 4,
+  "dataStartRow": 5,
+  "durationMinRow": 2,
+  "durationMaxRow": 3,
+  "columns": {
+    "group": 1,
+    "zone": 4,
+    "pickupStartDate": 7,
+    "rateStart": 9
+  },
+  "excludedGroups": ["CGAV", "FVMD", "SWAV"],
+  "groupRateAdjustmentsPlnDay": {
+    "EDMV": 1
+  },
+  "minExcelChangePlnDay": 0.01
+}

@@ -255,6 +255,7 @@ jobs:
           code=$?
           if [ "$code" -eq 0 ]; then npm run qeeq:report; code=$?; fi
           if [ "$code" -eq 0 ]; then npm run qeeq:xlsx; code=$?; fi
+          if [ "$code" -eq 0 ]; then npm run qeeq:recommend; code=$?; fi
           if [ "$code" -eq 0 ]; then npm run qeeq:aux; code=$?; fi
           if [ "$code" -eq 0 ]; then
             node -e "const fs=require('node:fs');const {exitCodeForPayload}=require('./src/qeeq/run');process.exitCode=exitCodeForPayload(JSON.parse(fs.readFileSync('output/qeeq-results-latest.json','utf8')));"
@@ -263,7 +264,7 @@ jobs:
           set -e
           printf '%s\n' "$code" > output/merged-exit-code.txt
           echo "exit_code=${code}" >> "$GITHUB_OUTPUT"
-          if [ -s output/qeeq-results-latest.json ] && [ -s output/qeeq-results.csv ] && [ -s output/qeeq-report.html ] && [ -s output/qeeq-summary.xlsx ] && [ -s output/quality-summary.json ] && [ -s output/run-manifest.json ]; then
+          if [ -s output/qeeq-results-latest.json ] && [ -s output/qeeq-results.csv ] && [ -s output/qeeq-report.html ] && [ -s output/qeeq-summary.xlsx ] && [ -s output/qeeq-pricing-recommendations.json ] && [ -s output/quality-summary.json ] && [ -s output/run-manifest.json ]; then
             echo "report_ready=true" >> "$GITHUB_OUTPUT"
           else
             echo "report_ready=false" >> "$GITHUB_OUTPUT"
@@ -280,6 +281,7 @@ jobs:
             output/qeeq-results.csv
             output/qeeq-report.html
             output/qeeq-summary.xlsx
+            output/qeeq-pricing-recommendations.json
             output/quality-summary.json
             output/run-manifest.json
             output/merged-exit-code.txt
@@ -310,6 +312,7 @@ jobs:
           cp merged/qeeq-results-latest.json pages-site/qeeq-results-latest.json
           cp merged/qeeq-results.csv pages-site/qeeq-results.csv
           cp merged/qeeq-summary.xlsx pages-site/qeeq-summary.xlsx
+          cp merged/qeeq-pricing-recommendations.json pages-site/qeeq-pricing-recommendations.json
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:
           path: pages-site
@@ -345,6 +348,7 @@ jobs:
           if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then exit 0; fi
           if [ -s merged/qeeq-results-latest.json ]; then
             summary_args=(--mode=final-summary --input=merged/qeeq-results-latest.json --artifact-url="$RUN_URL" --run-url="$RUN_URL")
+            if [ -s merged/qeeq-pricing-recommendations.json ]; then summary_args+=(--recommendations=merged/qeeq-pricing-recommendations.json); fi
             if [ -n "$REPORT_URL" ]; then summary_args+=(--report-url="$REPORT_URL"); fi
             message="$(node src/qeeq/telegramSummary.js "${summary_args[@]}")"
           else
